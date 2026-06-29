@@ -136,7 +136,7 @@ def build_markdown(
                 ev = _evidence_text(item)
             else:
                 point, ev = str(item), ""
-            lines.append(f"| {i} | {md_escape_cell(point)} | {md_escape_cell(ev or '명시적으로 확인되지 않음')} |")
+            lines.append(f"| {i} | {md_escape_cell(point)} | {md_escape_cell(ev or '원문 기반')} |")
     else:
         lines.append("- 명시적으로 확인되지 않음")
 
@@ -157,7 +157,7 @@ def build_markdown(
                 ev = _evidence_text(a)
             else:
                 task, owner, due, ev = str(a), "확인 필요", "확인 필요", ""
-            lines.append(f"| {md_escape_cell(task)} | {md_escape_cell(owner)} | {md_escape_cell(due)} | {md_escape_cell(ev or '명시적으로 확인되지 않음')} |")
+            lines.append(f"| {md_escape_cell(task)} | {md_escape_cell(owner)} | {md_escape_cell(due)} | {md_escape_cell(ev or '원문 기반')} |")
     else:
         lines.append("- 명시적 실행 항목 없음")
 

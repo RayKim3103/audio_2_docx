@@ -29,6 +29,7 @@ class PipelineOptions:
     allow_model_download: bool = True
     use_final_llm: bool = True
     skip_existing_asr: bool = True
+    processing_strategy: str = "auto"  # auto, fast, full, extractive
 
 
 class MeetingDocxAgent:
@@ -61,7 +62,7 @@ class MeetingDocxAgent:
             log_cb(f"🧭 선택 프로필: {profile.name} ({profile.label})")
             log_cb(f"🎧 ASR: {profile.asr_model} / {profile.asr_device} / {profile.asr_compute_type}")
             log_cb(f"🤖 LLM: {profile.llm_model} / {profile.llm_device}")
-            log_cb(f"📝 문서 상세도: {options.document_detail_level}")
+            log_cb(f"📝 문서 상세도: {options.document_detail_level} / 처리 전략: {options.processing_strategy}")
 
         audio_list = [Path(p) for p in audio_paths]
         for idx, src in enumerate(audio_list, start=1):
@@ -100,11 +101,12 @@ class MeetingDocxAgent:
                     allow_download=options.allow_model_download,
                     use_final_llm=options.use_final_llm,
                     detail_level=options.document_detail_level,
+                    processing_strategy=options.processing_strategy,
                     log_cb=log_cb,
                 )
                 json_path = write_json(json_dir / f"{stem}.summary.json", summary)
                 run_config_path = write_json(json_dir / f"{stem}.run_config.json", summary.get("run_config", {}))
-                md = build_markdown(
+                md = summary.get("final_markdown") or build_markdown(
                     stem,
                     summary["final"],
                     asr_result["segments"],
@@ -112,6 +114,9 @@ class MeetingDocxAgent:
                     detail_level=options.document_detail_level,
                     run_config=summary.get("run_config", {}),
                 )
+                if summary.get("final_markdown") and options.include_transcript_appendix:
+                    from .asr import segments_to_timestamped
+                    md = md.rstrip() + "\n\n---\n\n## 부록. 전체 Timestamped Transcript\n\n```text\n" + segments_to_timestamped(asr_result["segments"]) + "\n```\n"
                 md_path = write_text(md_dir / f"{stem}.md", md)
                 if log_cb:
                     log_cb(f"📄 Markdown 생성 완료: {len(md)} chars")

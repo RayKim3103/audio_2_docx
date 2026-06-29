@@ -38,7 +38,7 @@ def build_ui():
         hw = detect_hardware()
         return hw.to_markdown() + f"\n\n### 로컬 저장 위치\n- Project: `{PROJECT_ROOT}`\n- Runtime/packages/models/cache: `{RUNTIME_DIR}`\n- Outputs: `{OUTPUT_DIR}`"
 
-    def process(files, profile, language, output_language, glossary, detail_level, include_transcript, font_size, allow_download, use_final_llm, progress=gr.Progress(track_tqdm=False)):
+    def process(files, profile, language, output_language, glossary, detail_level, processing_strategy, include_transcript, font_size, allow_download, use_final_llm, progress=gr.Progress(track_tqdm=False)):
         if not files:
             return "오디오 파일을 업로드하세요.", None, ""
         if not isinstance(files, list):
@@ -54,6 +54,7 @@ def build_ui():
             output_language=output_language,
             glossary=glossary or "",
             document_detail_level=detail_level or "detailed",
+            processing_strategy=processing_strategy or "auto",
             include_transcript_appendix=bool(include_transcript),
             font_size_pt=int(font_size),
             allow_model_download=bool(allow_download),
@@ -86,8 +87,9 @@ def build_ui():
                     profile = gr.Dropdown(label="실행 프로필", choices=["auto"] + list(PROFILES.keys()), value="auto")
                     language = gr.Dropdown(label="음성 언어", choices=["auto", "ko", "en", "ja", "zh", "es", "fr", "de"], value="ko")
                     output_language = gr.Dropdown(label="문서 출력 언어", choices=["ko", "en"], value="ko")
-                    glossary = gr.Textbox(label="고유명사/전문용어 힌트(선택)", lines=3, placeholder="예: 프로젝트명, 회사명, 약어, 참석자 이름 등")
-                    detail_level = gr.Dropdown(label="문서 상세도", choices=[("간단 요약", "brief"), ("표준 회의록", "standard"), ("상세 회의록", "detailed")], value="detailed", info="결과가 빈약하면 '상세 회의록'을 사용하세요. CPU에서는 시간이 더 걸릴 수 있습니다.")
+                    glossary = gr.Textbox(label="고유명사/전문용어·ASR 보정 힌트(선택)", lines=4, placeholder="예: 프로젝트명, 회사명, 약어, 참석자 이름, 자주 틀리는 용어.\n예: SGA/ST/S개는 SK, 반독체는 반도체, 하인익스는 하이닉스")
+                    detail_level = gr.Dropdown(label="문서 상세도", choices=[("간단 요약", "brief"), ("표준 회의록", "standard"), ("상세 회의록", "detailed")], value="detailed", info="결과가 빈약하면 '상세 회의록'을 사용하세요.")
+                    processing_strategy = gr.Dropdown(label="처리 전략", choices=[("자동 추천", "auto"), ("빠른 작성: 시간순 digest→사람용 Markdown 1회", "fast"), ("전체 LLM: chunk별 추출+최종 작성", "full"), ("LLM 없이 빠른 추출", "extractive")], value="auto", info="CPU에서는 auto가 시간순 digest를 사람용 Markdown으로 직접 작성합니다. GPU에서는 auto/full이 chunk별 추출 후 최종 Markdown writer를 사용합니다.")
                     with gr.Accordion("고급 옵션", open=False):
                         include_transcript = gr.Checkbox(label="전체 transcript 부록 포함", value=False)
                         font_size = gr.Slider(label="DOCX 글씨 크기(pt)", minimum=8, maximum=12, step=1, value=8)
@@ -100,7 +102,7 @@ def build_ui():
                     logs = gr.Textbox(label="실행 로그", lines=20)
             run_btn.click(
                 fn=process,
-                inputs=[files, profile, language, output_language, glossary, detail_level, include_transcript, font_size, allow_download, use_final_llm],
+                inputs=[files, profile, language, output_language, glossary, detail_level, processing_strategy, include_transcript, font_size, allow_download, use_final_llm],
                 outputs=[summary, output_zip, logs],
             )
         with gr.Tab("3. 보안/운영 안내"):

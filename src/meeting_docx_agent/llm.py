@@ -86,7 +86,8 @@ class LocalTransformersLLM:
         gen_kwargs = dict(
             max_new_tokens=max_new,
             do_sample=False,
-            repetition_penalty=1.05,
+            repetition_penalty=1.07,
+            no_repeat_ngram_size=4,
             pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
