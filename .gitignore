@@ -1,0 +1,72 @@
+# Runtime / virtual environment
+.agent_runtime/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local workspace and generated outputs
+workspace/
+outputs/
+outputs_*/
+audio/
+uploads/
+downloads/
+tmp/
+temp/
+
+# Generated documents and archives
+*.docx
+*.pdf
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Audio / video inputs
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.aac
+*.ogg
+*.opus
+*.webm
+*.mp4
+*.mov
+
+# Model / cache files
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.gguf
+hf_home/
+hf_models/
+models/
+model_cache/
+.cache/
+pip_cache/
+torch_home/
+
+# Logs
+*.log
+logs/
+process_results*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.key
+*.pem
+token*
+secrets*
