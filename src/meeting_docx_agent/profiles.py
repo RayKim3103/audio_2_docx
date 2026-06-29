@@ -15,11 +15,15 @@ class RuntimeProfile:
     llm_model: str
     llm_device: str
     max_chars_per_chunk: int
+    chunk_overlap_chars: int
     max_new_tokens_chunk: int
     max_new_tokens_final: int
     description: str
 
 
+# v2 defaults: increased output token budgets and overlap to avoid sparse summaries.
+# CPU profiles are intentionally smaller than GPU profiles, but still provide enough
+# output budget for structured meeting notes.
 PROFILES: Dict[str, RuntimeProfile] = {
     "cpu_low": RuntimeProfile(
         name="cpu_low",
@@ -30,10 +34,11 @@ PROFILES: Dict[str, RuntimeProfile] = {
         asr_beam_size=1,
         llm_model="Qwen/Qwen2.5-0.5B-Instruct",
         llm_device="cpu",
-        max_chars_per_chunk=2800,
-        max_new_tokens_chunk=900,
-        max_new_tokens_final=1300,
-        description="RAM 8~12GB급 노트북. 속도와 안정성 우선.",
+        max_chars_per_chunk=2600,
+        chunk_overlap_chars=250,
+        max_new_tokens_chunk=1500,
+        max_new_tokens_final=2800,
+        description="RAM 8~12GB급 노트북. 속도와 안정성 우선. 상세도는 standard 이하 권장.",
     ),
     "cpu_standard": RuntimeProfile(
         name="cpu_standard",
@@ -44,10 +49,11 @@ PROFILES: Dict[str, RuntimeProfile] = {
         asr_beam_size=1,
         llm_model="Qwen/Qwen2.5-1.5B-Instruct",
         llm_device="cpu",
-        max_chars_per_chunk=3600,
-        max_new_tokens_chunk=1200,
-        max_new_tokens_final=1800,
-        description="RAM 16~32GB급 CPU 환경. CPU에서는 느릴 수 있음.",
+        max_chars_per_chunk=3200,
+        chunk_overlap_chars=350,
+        max_new_tokens_chunk=2200,
+        max_new_tokens_final=4200,
+        description="RAM 16~32GB급 CPU 환경. 시간이 걸리지만 표준 회의록 품질을 목표로 함.",
     ),
     "gpu_light": RuntimeProfile(
         name="gpu_light",
@@ -59,9 +65,10 @@ PROFILES: Dict[str, RuntimeProfile] = {
         llm_model="Qwen/Qwen2.5-1.5B-Instruct",
         llm_device="cuda",
         max_chars_per_chunk=4200,
-        max_new_tokens_chunk=1300,
-        max_new_tokens_final=2000,
-        description="CUDA가 가능한 보급형 GPU.",
+        chunk_overlap_chars=450,
+        max_new_tokens_chunk=2600,
+        max_new_tokens_final=5200,
+        description="CUDA가 가능한 보급형 GPU. 상세 회의록 모드 사용 가능.",
     ),
     "gpu_balanced": RuntimeProfile(
         name="gpu_balanced",
@@ -73,9 +80,10 @@ PROFILES: Dict[str, RuntimeProfile] = {
         llm_model="Qwen/Qwen2.5-3B-Instruct",
         llm_device="cuda",
         max_chars_per_chunk=5200,
-        max_new_tokens_chunk=1500,
-        max_new_tokens_final=2400,
-        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필.",
+        chunk_overlap_chars=550,
+        max_new_tokens_chunk=3300,
+        max_new_tokens_final=6800,
+        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필. 상세 회의록 권장.",
     ),
     "gpu_quality": RuntimeProfile(
         name="gpu_quality",
@@ -87,8 +95,9 @@ PROFILES: Dict[str, RuntimeProfile] = {
         llm_model="Qwen/Qwen2.5-7B-Instruct",
         llm_device="cuda",
         max_chars_per_chunk=6500,
-        max_new_tokens_chunk=1800,
-        max_new_tokens_final=3000,
+        chunk_overlap_chars=700,
+        max_new_tokens_chunk=4200,
+        max_new_tokens_final=8500,
         description="RTX 3090/4090 또는 24GB급 이상에서 품질 우선. 다운로드/메모리 사용량 큼.",
     ),
 }

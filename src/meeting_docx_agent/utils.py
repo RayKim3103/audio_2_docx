@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shutil
@@ -51,6 +52,63 @@ def clean_text_for_xml(text: str) -> str:
     if text is None:
         return ""
     return "".join(ch for ch in str(text) if ch in "\t\n\r" or (ord(ch) >= 32 and not (0xD800 <= ord(ch) <= 0xDFFF)))
+
+
+
+def humanize_llm_value(value: Any, max_len: int = 1200) -> str:
+    """Convert accidental JSON/Python-literal-looking LLM text into readable prose.
+
+    Small local LLMs sometimes return a dictionary/list as a *string*, e.g.
+    "{'heading': '회의록 제목', 'bullets': ['회의 날짜: ...']}".  This helper
+    keeps validation tolerant while preventing those raw literal strings from
+    leaking into Markdown/DOCX.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts = [humanize_llm_value(v, max_len=max_len) for v in value]
+        return "; ".join(p for p in parts if p)[:max_len]
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in ["heading", "title", "topic", "name", "term"]:
+            v = value.get(key)
+            if v:
+                s = humanize_llm_value(v, max_len=200)
+                if s:
+                    parts.append(s)
+                    break
+        for key in ["summary", "text", "point", "description", "desc", "result", "follow_up", "후속 조치", "주요 내용", "결과"]:
+            v = value.get(key)
+            if v:
+                s = humanize_llm_value(v, max_len=max_len)
+                if s:
+                    parts.append(s)
+        for key in ["bullets", "details", "items", "key_points", "내용"]:
+            v = value.get(key)
+            if v:
+                s = humanize_llm_value(v, max_len=max_len)
+                if s:
+                    parts.append(s)
+        # Remove duplicates while preserving order.
+        uniq: list[str] = []
+        for p in parts:
+            p = re.sub(r"\s+", " ", p).strip()
+            if p and p not in uniq:
+                uniq.append(p)
+        return " / ".join(uniq)[:max_len]
+
+    s = clean_text_for_xml(str(value)).strip()
+    # Parse accidental literal strings only when the entire string looks like a literal.
+    stripped = s.strip()
+    if len(stripped) <= 6000 and stripped[:1] in "[{" and stripped[-1:] in "]}":
+        for parser in (ast.literal_eval, json.loads):
+            try:
+                parsed = parser(stripped)
+                if parsed is not value:
+                    return humanize_llm_value(parsed, max_len=max_len)
+            except Exception:
+                pass
+    return re.sub(r"\s+", " ", s)[:max_len]
 
 
 def make_zip(zip_path: Path, files: Iterable[Path], base_dir: Path | None = None) -> Path:

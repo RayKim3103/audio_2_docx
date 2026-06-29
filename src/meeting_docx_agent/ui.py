@@ -38,7 +38,7 @@ def build_ui():
         hw = detect_hardware()
         return hw.to_markdown() + f"\n\n### 로컬 저장 위치\n- Project: `{PROJECT_ROOT}`\n- Runtime/packages/models/cache: `{RUNTIME_DIR}`\n- Outputs: `{OUTPUT_DIR}`"
 
-    def process(files, profile, language, output_language, glossary, include_transcript, font_size, allow_download, use_final_llm, progress=gr.Progress(track_tqdm=False)):
+    def process(files, profile, language, output_language, glossary, detail_level, include_transcript, font_size, allow_download, use_final_llm, progress=gr.Progress(track_tqdm=False)):
         if not files:
             return "오디오 파일을 업로드하세요.", None, ""
         if not isinstance(files, list):
@@ -53,6 +53,7 @@ def build_ui():
             language=language,
             output_language=output_language,
             glossary=glossary or "",
+            document_detail_level=detail_level or "detailed",
             include_transcript_appendix=bool(include_transcript),
             font_size_pt=int(font_size),
             allow_model_download=bool(allow_download),
@@ -86,6 +87,7 @@ def build_ui():
                     language = gr.Dropdown(label="음성 언어", choices=["auto", "ko", "en", "ja", "zh", "es", "fr", "de"], value="ko")
                     output_language = gr.Dropdown(label="문서 출력 언어", choices=["ko", "en"], value="ko")
                     glossary = gr.Textbox(label="고유명사/전문용어 힌트(선택)", lines=3, placeholder="예: 프로젝트명, 회사명, 약어, 참석자 이름 등")
+                    detail_level = gr.Dropdown(label="문서 상세도", choices=[("간단 요약", "brief"), ("표준 회의록", "standard"), ("상세 회의록", "detailed")], value="detailed", info="결과가 빈약하면 '상세 회의록'을 사용하세요. CPU에서는 시간이 더 걸릴 수 있습니다.")
                     with gr.Accordion("고급 옵션", open=False):
                         include_transcript = gr.Checkbox(label="전체 transcript 부록 포함", value=False)
                         font_size = gr.Slider(label="DOCX 글씨 크기(pt)", minimum=8, maximum=12, step=1, value=8)
@@ -98,7 +100,7 @@ def build_ui():
                     logs = gr.Textbox(label="실행 로그", lines=20)
             run_btn.click(
                 fn=process,
-                inputs=[files, profile, language, output_language, glossary, include_transcript, font_size, allow_download, use_final_llm],
+                inputs=[files, profile, language, output_language, glossary, detail_level, include_transcript, font_size, allow_download, use_final_llm],
                 outputs=[summary, output_zip, logs],
             )
         with gr.Tab("3. 보안/운영 안내"):

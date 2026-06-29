@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import time
 import uuid
@@ -23,6 +22,7 @@ class PipelineOptions:
     language: str = "ko"
     output_language: str = "ko"
     glossary: str = ""
+    document_detail_level: str = "detailed"  # brief, standard, detailed
     include_transcript_appendix: bool = False
     font_size_pt: int = 8
     font_name: str = "Malgun Gothic"
@@ -61,6 +61,7 @@ class MeetingDocxAgent:
             log_cb(f"🧭 선택 프로필: {profile.name} ({profile.label})")
             log_cb(f"🎧 ASR: {profile.asr_model} / {profile.asr_device} / {profile.asr_compute_type}")
             log_cb(f"🤖 LLM: {profile.llm_model} / {profile.llm_device}")
+            log_cb(f"📝 문서 상세도: {options.document_detail_level}")
 
         audio_list = [Path(p) for p in audio_paths]
         for idx, src in enumerate(audio_list, start=1):
@@ -83,7 +84,8 @@ class MeetingDocxAgent:
                     log_cb(f"🎙️ 전사 시작: {audio.name}")
                 asr_result = self.transcriber.transcribe(audio, asr_opts)
                 transcript_paths = save_transcript_outputs(asr_result, transcript_dir, stem)
-                shutil.copy2(transcript_paths["segments"], segment_dir / f"{stem}.segments.json")
+                segments_copy = segment_dir / f"{stem}.segments.json"
+                shutil.copy2(transcript_paths["segments"], segments_copy)
                 if log_cb:
                     log_cb(f"✅ 전사 완료: segment {len(asr_result['segments'])}개")
 
@@ -97,13 +99,22 @@ class MeetingDocxAgent:
                     glossary=options.glossary,
                     allow_download=options.allow_model_download,
                     use_final_llm=options.use_final_llm,
+                    detail_level=options.document_detail_level,
                     log_cb=log_cb,
                 )
                 json_path = write_json(json_dir / f"{stem}.summary.json", summary)
-                md = build_markdown(stem, summary["final"], asr_result["segments"], include_transcript_appendix=options.include_transcript_appendix)
+                run_config_path = write_json(json_dir / f"{stem}.run_config.json", summary.get("run_config", {}))
+                md = build_markdown(
+                    stem,
+                    summary["final"],
+                    asr_result["segments"],
+                    include_transcript_appendix=options.include_transcript_appendix,
+                    detail_level=options.document_detail_level,
+                    run_config=summary.get("run_config", {}),
+                )
                 md_path = write_text(md_dir / f"{stem}.md", md)
                 if log_cb:
-                    log_cb("📄 Markdown 생성 완료")
+                    log_cb(f"📄 Markdown 생성 완료: {len(md)} chars")
                 docx_path = markdown_to_docx(md_path, docx_dir / f"{stem}.docx", font_size_pt=options.font_size_pt, font_name=options.font_name)
                 if log_cb:
                     log_cb(f"✅ DOCX 생성 완료: {docx_path.name}")
@@ -115,10 +126,12 @@ class MeetingDocxAgent:
                     "markdown": str(md_path),
                     "transcript": str(transcript_paths["txt"]),
                     "timestamped": str(transcript_paths["timestamped"]),
+                    "segments": str(segments_copy),
                     "summary_json": str(json_path),
+                    "run_config_json": str(run_config_path),
                 }
                 results.append(result)
-                files_to_zip.extend([docx_path, md_path, transcript_paths["txt"], transcript_paths["timestamped"], json_path])
+                files_to_zip.extend([docx_path, md_path, transcript_paths["txt"], transcript_paths["timestamped"], segments_copy, json_path, run_config_path])
             except Exception as e:
                 err = {"audio": str(src), "status": "failed", "error": repr(e)}
                 results.append(err)
@@ -126,5 +139,5 @@ class MeetingDocxAgent:
                     log_cb(f"❌ 실패: {src.name}: {repr(e)}")
         results_path = write_json(log_dir / "process_results.json", results)
         files_to_zip.append(results_path)
-        zip_path = make_zip(run_dir / "meeting_docx_outputs.zip", files_to_zip, base_dir=run_dir)
+        zip_path = make_zip(run_dir / "audio_2_docx_outputs.zip", files_to_zip, base_dir=run_dir)
         return {"run_dir": str(run_dir), "zip": str(zip_path), "results": results}
