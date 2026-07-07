@@ -21,9 +21,9 @@ class RuntimeProfile:
     description: str
 
 
-# v8 defaults: CPU auto uses direct writer fast mode (chronological digest -> human Markdown)
-# to keep runtime practical while avoiding chunk-like outputs. GPU profiles use full LLM
-# extraction plus a final human-readable Markdown writer pass.
+# v14 defaults: CPU auto keeps the practical direct-writer fast mode.
+# GPU profiles use a grounded content pack + document-architect Markdown writer.
+# The goal is to synthesize a human-readable document instead of copying transcript chunks.
 PROFILES: Dict[str, RuntimeProfile] = {
     "cpu_low": RuntimeProfile(
         name="cpu_low",
@@ -64,11 +64,11 @@ PROFILES: Dict[str, RuntimeProfile] = {
         asr_beam_size=3,
         llm_model="Qwen/Qwen2.5-1.5B-Instruct",
         llm_device="cuda",
-        max_chars_per_chunk=3400,
-        chunk_overlap_chars=350,
-        max_new_tokens_chunk=1700,
+        max_chars_per_chunk=3200,
+        chunk_overlap_chars=320,
+        max_new_tokens_chunk=1500,
         max_new_tokens_final=3600,
-        description="CUDA가 가능한 보급형 GPU. v8에서는 작은 chunk와 최종 Markdown writer로 가독성을 개선했습니다.",
+        description="CUDA가 가능한 보급형 GPU. v14에서는 content pack 기반 document-architect writer로 가독성을 개선했습니다.",
     ),
     "gpu_balanced": RuntimeProfile(
         name="gpu_balanced",
@@ -79,14 +79,14 @@ PROFILES: Dict[str, RuntimeProfile] = {
         asr_beam_size=3,
         llm_model="Qwen/Qwen2.5-3B-Instruct",
         llm_device="cuda",
-        # v8: balanced profile uses moderate chunks and a final human Markdown writer.
-        # The goal is not only structured extraction, but a report that reads like
-        # a person organized the meeting/recording.
-        max_chars_per_chunk=3800,
-        chunk_overlap_chars=400,
-        max_new_tokens_chunk=2100,
+        # v9: balanced profile uses smaller extraction chunks and a transcript-first
+        # final writer.  Final document quality comes from sectioned Markdown
+        # writing rather than a single huge JSON merge.
+        max_chars_per_chunk=3600,
+        chunk_overlap_chars=360,
+        max_new_tokens_chunk=1900,
         max_new_tokens_final=4600,
-        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필. v8에서는 chunk 추출 후 최종 Markdown writer로 사람이 읽기 좋은 문서를 생성합니다.",
+        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필. v14에서는 content pack 기반 document-architect writer를 우선 사용해 사람이 쓴 문서처럼 정리합니다.",
     ),
     "gpu_quality": RuntimeProfile(
         name="gpu_quality",
@@ -97,11 +97,11 @@ PROFILES: Dict[str, RuntimeProfile] = {
         asr_beam_size=5,
         llm_model="Qwen/Qwen2.5-7B-Instruct",
         llm_device="cuda",
-        max_chars_per_chunk=5400,
-        chunk_overlap_chars=600,
-        max_new_tokens_chunk=3300,
-        max_new_tokens_final=6800,
-        description="RTX 3090/4090 또는 24GB급 이상에서 품질 우선. v8에서는 긴 context를 활용하되 final JSON 과생성을 줄여 안정성을 높였습니다.",
+        max_chars_per_chunk=5000,
+        chunk_overlap_chars=520,
+        max_new_tokens_chunk=3000,
+        max_new_tokens_final=7200,
+        description="RTX 3090/4090 또는 24GB급 이상에서 품질 우선. v14에서는 content pack 기반 document-architect writer를 우선 사용하여 7B 모델이 구조화된 문서를 쓰도록 합니다.",
     ),
 }
 

@@ -1,9 +1,17 @@
 # Local Meeting Audio → DOCX Agent
 
 
-## v8 GPU quality update
 
-Version `general_meeting_v8` improves GPU profiles, especially `gpu_balanced`, by using smaller transcript chunks, a transcript-aware final synthesis prompt, optional Korean language/style repair, and less noisy evidence rendering. The goal is to improve DOCX quality while keeping the full LLM pipeline for GPU users.
+## v14 quality update
+
+- GPU profiles now use a transcript-first final Markdown writer as the primary DOCX path.
+- Short/medium transcripts are passed directly to the final writer instead of relying on JSON merge output.
+- If the first final Markdown draft contains JSON leakage, CJK language drift, or fragment-like text, the app performs one repair pass before falling back to a safe transcript-based Markdown.
+- This is designed to improve GPU quality profiles, especially `gpu_quality` with 7B LLMs, while keeping the general-domain target.
+
+## v14 GPU quality update
+
+Version `general_meeting_v14` improves GPU profiles, especially `gpu_balanced`, by using smaller transcript chunks, a transcript-aware final synthesis prompt, optional Korean language/style repair, and less noisy evidence rendering. The goal is to improve DOCX quality while keeping the full LLM pipeline for GPU users.
 
 Recommended GPU settings:
 
@@ -22,6 +30,12 @@ A local AI agent that converts general-domain meeting, lecture, interview, or re
 This project does **not** use external LLM APIs such as OpenAI, Gemini, or Claude API. Audio transcription and summarization are performed on the computer or server where this app is launched.
 
 ---
+
+
+
+## v14 Quality Update
+
+This version improves GPU-quality outputs by using a grounded content plan before the final LLM writer. The app first extracts a general-domain content plan from the transcript, detects whether the recording is closer to a meeting, lecture, interview, presentation, or commentary, and then asks the LLM to write a human-facing Markdown report from that plan and the original transcript. If the LLM output is still weak, the app falls back to a content-plan based Markdown instead of leaking JSON or chunk fragments into DOCX.
 
 ## What this system does
 
@@ -217,10 +231,27 @@ Choose `cpu_low` or `gpu_light` first to test the pipeline. Larger profiles down
 
 ### v6 CPU optimization changes
 
-- `PIPELINE_VERSION` is now `general_meeting_v8`.
+- `PIPELINE_VERSION` is now `general_meeting_v14`.
 - CPU `auto` mode no longer performs LLM generation for every chunk; it uses extractive chunk notes plus one LLM polishing call.
 - This is designed to reduce CPU runtime from very long runs to a more practical range while preserving structured details.
 - The LLM generation settings include stronger repetition control.
 - If the LLM output is repetitive or sparse, the pipeline falls back to extractive/chunk-based details rather than saving a poor DOCX.
 - ASR-error-aware prompting from v4 is retained.
 - `run_config.json` includes `processing_strategy_effective` and `llm_calls` for troubleshooting.
+
+
+## v14 Quality Update
+
+Version v14 changes the GPU full-quality path to a direct transcript-first Markdown writer. Earlier versions could still produce sparse documents because intermediate JSON or chunk-based notes dominated the final DOCX. v14 asks the GPU LLM to write the final human-facing report directly from the timestamped transcript, then applies a quality check for missing sections, JSON leakage, mixed CJK characters, excessive `명시적으로 확인되지 않음`, and low-value keyword lists.
+
+For GPU experiments, recommended settings are:
+
+```text
+Profile: gpu_quality or gpu_balanced
+Processing strategy: full
+Detail level: detailed
+Output language: ko
+Use final LLM: enabled
+```
+
+For domain-specific recordings, provide glossary hints such as names, project names, product names, acronyms, and known ASR correction pairs.

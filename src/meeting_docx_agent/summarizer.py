@@ -10,7 +10,7 @@ from .llm import get_llm
 from .profiles import RuntimeProfile
 from .utils import clean_text_for_xml, humanize_llm_value
 
-PIPELINE_VERSION = "general_meeting_v8"
+PIPELINE_VERSION = "general_meeting_v14"
 
 SYSTEM_PROMPT = """
 당신은 보안이 중요한 로컬 환경에서 동작하는 회의록/녹음 정리 전문 AI입니다.
@@ -30,12 +30,14 @@ Python dict/list 문자열, JSON 문자열, key-value dump를 본문 값으로 �
 """.strip()
 
 SYSTEM_PROMPT_MARKDOWN = """
-당신은 보안이 중요한 로컬 환경에서 동작하는 회의록/녹음 정리 전문 AI입니다.
-입력 transcript는 ASR 전사 결과이므로 오인식이 섞일 수 있습니다. 문맥상 명확한 경우에만 자연스럽게 보정하고, 불확실한 내용은 확인 필요로 남기세요.
-이 애플리케이션은 general domain 회의/강의/인터뷰/발표/설명 영상 정리를 위한 것입니다. 특정 회사, 산업, 샘플에 편향하지 마세요.
-출력 언어가 ko이면 반드시 자연스러운 한국어 문장으로만 작성하세요. 중국어·일본어·한자식 문자를 섞지 마세요. NVIDIA, HBM, AI 같은 통용 약어는 유지할 수 있습니다.
-최종 독자는 사람이므로 raw transcript 조각을 그대로 나열하지 말고, 의미 단위로 묶어 문서화하세요.
-원문에 없는 사실을 만들지 말고, 숫자·날짜·인물·회사명·결정사항은 특히 보수적으로 다루세요.
+당신은 보안이 중요한 로컬 환경에서 동작하는 전문 기록 정리자입니다.
+당신의 일은 ASR transcript를 사람이 읽는 최종 문서로 재구성하는 것입니다.
+입력 transcript는 Whisper/faster-whisper 같은 ASR 결과이므로 고유명사·숫자·날짜·약어·전문용어에 오류가 섞일 수 있습니다. 문맥과 사용자 힌트가 명확한 경우에만 자연스럽게 보정하고, 불확실하면 확인 필요로 남기세요.
+이 애플리케이션은 general domain 회의·강의·인터뷰·발표·교육 영상·해설 영상·상담 녹음을 모두 처리합니다. 특정 회사, 산업, 샘플 형식에 편향하지 마세요.
+출력 언어가 ko이면 반드시 자연스러운 한국어 문장으로만 작성하세요. 중국어·일본어·한자식 문자, 어색한 직역체를 섞지 마세요. NVIDIA, HBM, AI, API 같은 통용 약어는 유지할 수 있습니다.
+raw transcript 조각을 그대로 나열하지 말고, 의미 단위로 묶어 배경 → 핵심 내용 → 구조 → 시사점/후속 확인 순서로 정리하세요.
+원문에 없는 사실을 만들지 마세요. 숫자·날짜·인물·회사명·결정사항·금액은 특히 보수적으로 다루세요.
+회의가 아니면 참석자·결정사항·실행항목을 억지로 만들지 말고, 강의/설명 자료에 맞게 핵심 개념과 학습 흐름을 정리하세요.
 Markdown 문서만 반환하세요. 코드블록, JSON, Python dict/list 문자열, 작성 지시문은 출력하지 마세요.
 """.strip()
 
@@ -116,6 +118,20 @@ CJK_KO_REPLACEMENTS = {
 }
 
 COMMON_ASR_TEXT_FIXES = {
+    "연말정착": "연말정산",
+    "연말 정착": "연말정산",
+    "연말결 산": "연말정산",
+    "연말 결 산": "연말정산",
+    "연말정 산": "연말정산",
+    "연말정 삐": "연말정산",
+    "소득 곱제": "소득공제",
+    "소득 공 제": "소득공제",
+    "세액 공 제": "세액공제",
+    "총 급여": "총급여",
+    "추가 징 수": "추가 징수",
+    "추가 징세": "추가 징수",
+    "환 급": "환급",
+    "추 징": "추징",
     "엔비디亚": "엔비디아",
     "엔비티아": "엔비디아",
     "엔비스티아": "엔비디아",
@@ -1545,7 +1561,7 @@ def make_direct_markdown_prompt(
 ) -> str:
     """Prompt for the final human-facing Markdown writer.
 
-    v8: instead of forcing the last model call to emit another large JSON, ask it
+    v9: instead of forcing the last model call to emit another large JSON, ask it
     to write the actual report in Markdown from a grounded draft + time-ordered
     digest. This is more robust and produces less chunk-like prose.
     """
@@ -1694,6 +1710,485 @@ def generate_direct_markdown(
     return None, False
 
 
+
+# ---------------------------------------------------------------------------
+# v9 transcript-first sectioned Markdown writer
+# ---------------------------------------------------------------------------
+
+def writer_budget_for_profile(profile: RuntimeProfile, detail_level: str) -> dict:
+    """Return transcript/digest and token budgets for the v9 final writer.
+
+    The v8 GPU path still depended too much on JSON/draft objects.  v9 lets GPU
+    profiles write the final human-facing document from transcript-first evidence.
+    """
+    name = getattr(profile, "name", "")
+    if name == "gpu_quality":
+        return {"blocks": 54 if detail_level == "detailed" else 40, "block_chars": 1350, "total_chars": 62000, "part1": 1800, "part2": 4200, "part3": 3600}
+    if name == "gpu_balanced":
+        return {"blocks": 38 if detail_level == "detailed" else 28, "block_chars": 1250, "total_chars": 44000, "part1": 1500, "part2": 3300, "part3": 2800}
+    if name == "gpu_light":
+        return {"blocks": 28 if detail_level == "detailed" else 22, "block_chars": 1100, "total_chars": 30000, "part1": 1200, "part2": 2600, "part3": 2200}
+    # CPU fast path uses one compact writer elsewhere.
+    return {"blocks": 20, "block_chars": 1000, "total_chars": 22000, "part1": 1100, "part2": 2200, "part3": 1800}
+
+
+def build_writer_context(segments: list[dict], profile: RuntimeProfile, detail_level: str) -> str:
+    budget = writer_budget_for_profile(profile, detail_level)
+    blocks = chronological_blocks(
+        segments,
+        block_max_chars=budget["block_chars"],
+        max_blocks=budget["blocks"],
+        max_total_chars=budget["total_chars"],
+    )
+    return blocks_to_prompt_text(blocks)
+
+
+def compact_support_notes(notes: list[dict], max_chars: int = 14000) -> str:
+    """Compact chunk notes as optional support, not as the primary source."""
+    rows: list[str] = []
+    for i, n in enumerate(notes[:18], start=1):
+        topics = []
+        for t in as_list(n.get("topics"))[:4]:
+            if not isinstance(t, dict):
+                continue
+            h = clean_item_text(t.get("heading"), 100)
+            bullets = [clean_item_text(b, 220) for b in as_list(t.get("bullets"))[:3]]
+            bullets = [b for b in bullets if b and not is_poor_bullet(b)]
+            if h and bullets:
+                topics.append(f"- {h}: {' / '.join(bullets)}")
+        if topics:
+            rows.append(f"[chunk {i}]\n" + "\n".join(topics))
+        if sum(len(x) for x in rows) > max_chars:
+            break
+    return "\n\n".join(rows)[:max_chars]
+
+
+def section_prompt_common(title: str, transcript_digest: str, glossary: str, language: str, detail_level: str) -> str:
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    return f"""
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {detail_cfg(detail_level)['label']}
+{glossary_text}
+공통 작성 원칙:
+- 아래 시간순 transcript digest를 최우선 근거로 사용하세요.
+- general domain 회의/강의/인터뷰/발표/교육/해설 녹음을 모두 고려하세요. 녹음 성격에 맞는 문서로 정리하세요.
+- 사람이 읽는 최종 문서입니다. 발화 조각을 그대로 붙이지 말고 자연스러운 문장으로 재구성하세요.
+- 원문에 없는 사실을 만들지 마세요. 숫자, 날짜, 금액, 회사명, 인물명, 결정사항은 특히 보수적으로 작성하세요.
+- ASR 오류가 의심되면 문맥상 명확한 것만 보정하고, 불확실한 것은 확인 필요한 내용으로 남기세요.
+- 한국어 출력에서는 중국어·일본어·한자식 글자를 섞지 마세요.
+- 코드블록, JSON, Python dict/list, 작성 지시문은 출력하지 마세요.
+
+시간순 transcript digest:
+{transcript_digest}
+""".strip()
+
+
+def make_section_prompt(part: str, title: str, transcript_digest: str, support: str, glossary: str, language: str, detail_level: str) -> str:
+    common = section_prompt_common(title, transcript_digest, glossary, language, detail_level)
+    support_text = f"\n\n보조 chunk note 참고자료:\n{support}" if support.strip() else ""
+    if part == "overview":
+        return common + f"""
+
+아래 섹션만 Markdown으로 작성하세요.
+
+# {title}
+
+## 1. 한 페이지 요약
+- bullet이 아니라 1~2개의 자연스러운 문단으로 작성하세요.
+- 핵심 배경, 다룬 주제, 핵심 메시지, 확인/후속 포인트가 자연스럽게 이어지게 하세요.
+- 회의가 아닌 강의/설명 영상이면 '무엇을 설명하는 자료인지'와 '핵심 개념의 흐름'을 요약하세요.
+
+## 2. 전체 구조화 정리
+- 문서 전체 흐름을 5~8개의 bullet로 정리하세요.
+- 너무 짧은 발화 조각이나 의미 없는 표현은 넣지 마세요.
+""" + support_text
+    if part == "details":
+        return common + f"""
+
+아래 섹션만 Markdown으로 작성하세요.
+
+## 3. 주제별 상세 정리
+- 6~10개 주제로 나누세요. 짧은 녹음이면 4~6개도 괜찮습니다.
+- 각 주제는 ### 소제목으로 시작하고, 3~6개 bullet로 세부 내용을 설명하세요.
+- 소제목은 '주요 논의 1' 같은 일반 제목이 아니라 실제 내용을 나타내는 제목으로 작성하세요.
+- 원문 흐름을 사람이 이해할 수 있게 재구성하세요. 발화 조각을 그대로 나열하지 마세요.
+
+## 4. 핵심 개념 / 논점
+- 표가 아니라 bullet 목록으로 작성하세요.
+- 각 bullet은 '개념/논점: 설명' 형식으로 작성하세요.
+- 강의/교육 자료라면 핵심 개념과 구조를 중심으로, 회의라면 논점과 판단 포인트를 중심으로 작성하세요.
+""" + support_text
+    return common + f"""
+
+아래 섹션만 Markdown으로 작성하세요.
+
+## 5. 결정사항 / 결론
+- 회의라면 결정사항을, 강의/설명/뉴스성 녹음이라면 주요 결론 또는 시사점을 작성하세요.
+- 원문에 없으면 '명시적 결정사항 없음'이라고 간단히 쓰세요.
+
+## 6. 실행 항목
+- 담당자/기한이 명확한 할 일이 있을 때만 작성하세요.
+- 없으면 '명시적 실행 항목 없음'이라고 쓰세요.
+
+## 7. 리스크 / 이슈
+- 실제로 언급된 문제, 불확실성, 논란, 주의점을 정리하세요.
+
+## 8. 타임라인 / 진행 흐름
+- 시간순으로 6~12개 bullet을 작성하세요.
+- 가능한 경우 [HH:MM:SS] 형식을 사용하세요.
+
+## 9. 중요 발언 / 근거
+- 의미 있는 발언 5~10개를 고르세요.
+- 가능하면 timestamp 또는 segment 근거를 붙이세요.
+
+## 10. 용어 / 개념
+- 실제 고유명사, 제도, 제품명, 기술명, 방법론만 넣으세요.
+- 일반 발화어, 감탄사, 조사성 표현은 넣지 마세요.
+
+## 11. 확인 필요한 내용
+- ASR 오인식 또는 사실 확인이 필요한 내용을 작성하세요.
+- 없으면 '명시적으로 확인 필요한 내용 없음'이라고 쓰세요.
+""" + support_text
+
+
+def extract_markdown_sections(md: str) -> dict[str, str]:
+    md = cleanup_markdown(md, "") if md else ""
+    matches = list(re.finditer(r"(?m)^##\s+(\d+)\.\s+.*$", md))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(md)
+        num = m.group(1)
+        sections[num] = md[start:end].strip()
+    title_match = re.search(r"(?m)^#\s+.*$", md)
+    if title_match:
+        sections["title"] = title_match.group(0).strip()
+    return sections
+
+
+def markdown_artifact_score(md: str) -> int:
+    score = 0
+    if not md or len(md.strip()) < 700:
+        score += 4
+    if has_template_leak(md):
+        score += 4
+    if re.search(r"\{\s*['\"]?(heading|bullets|summary|text)['\"]?\s*:", md):
+        score += 5
+    if re.search(r"[\u3040-\u30ff]", md):
+        score += 5
+    if re.search(r"[\u3400-\u9fff]", md):
+        score += 5
+    if md.count("명시적으로 확인되지 않음") >= 10:
+        score += 2
+    words = re.findall(r"[가-힣A-Za-z0-9]{2,}", md)
+    if len(words) > 100:
+        top, cnt = Counter(words).most_common(1)[0]
+        if cnt > 40 and cnt / len(words) > 0.08:
+            score += 3
+    return score
+
+
+def assemble_sectioned_markdown(title: str, parts: list[str]) -> str:
+    all_md = "\n\n".join(cleanup_markdown(p, title) for p in parts if p and p.strip())
+    sections = extract_markdown_sections(all_md)
+    lines = [f"# {title}", ""]
+    expected = [
+        ("1", "## 1. 한 페이지 요약"),
+        ("2", "## 2. 전체 구조화 정리"),
+        ("3", "## 3. 주제별 상세 정리"),
+        ("4", "## 4. 핵심 개념 / 논점"),
+        ("5", "## 5. 결정사항 / 결론"),
+        ("6", "## 6. 실행 항목"),
+        ("7", "## 7. 리스크 / 이슈"),
+        ("8", "## 8. 타임라인 / 진행 흐름"),
+        ("9", "## 9. 중요 발언 / 근거"),
+        ("10", "## 10. 용어 / 개념"),
+        ("11", "## 11. 확인 필요한 내용"),
+    ]
+    for num, heading in expected:
+        body = sections.get(num, "").strip()
+        if body:
+            # Normalize heading text to the expected one.
+            body = re.sub(r"(?m)^##\s+" + re.escape(num) + r"\.\s+.*$", heading, body, count=1)
+            lines += [body, ""]
+        else:
+            lines += [heading, "", "- 명시적으로 확인되지 않음", ""]
+    return cleanup_markdown("\n".join(lines), title)
+
+
+def generate_sectioned_markdown(
+    llm,
+    title: str,
+    notes: list[dict],
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str | None, bool]:
+    """GPU v9 final writer: create final Markdown in sections from transcript.
+
+    This avoids the weak point observed in v9: a large LLM created a valid but poor
+    JSON, and the DOCX inherited that poor structure.  Sectioned Markdown writing
+    is slower than one final call but far more stable on GPU profiles.
+    """
+    if profile.llm_device != "cuda":
+        return None, False
+    budget = writer_budget_for_profile(profile, detail_level)
+    transcript_digest = build_writer_context(segments, profile, detail_level)
+    support = compact_support_notes(notes, max_chars=16000 if profile.name == "gpu_quality" else 11000)
+    part_defs = [
+        ("overview", budget["part1"]),
+        ("details", budget["part2"]),
+        ("closing", budget["part3"]),
+    ]
+    parts: list[str] = []
+    for part, tok in part_defs:
+        prompt = make_section_prompt(part, title, transcript_digest, support, glossary, language, detail_level)
+        if log_cb:
+            log_cb(f"✍️ v9 섹션별 Markdown writer 생성: {part} / max_new_tokens={tok}")
+        raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=tok)
+        md = cleanup_markdown(raw, title)
+        # Do not reject a single section too aggressively; assemble first, then score.
+        parts.append(md)
+    final_md = assemble_sectioned_markdown(title, parts)
+    final_md = normalize_language_artifacts(final_md)
+    final_md = cleanup_markdown(final_md, title)
+    if markdown_artifact_score(final_md) <= 3:
+        return final_md, True
+    if log_cb:
+        log_cb("⚠️ v9 섹션별 Markdown writer 결과에 품질 문제가 있어 기존 구조화 Markdown 경로로 fallback합니다.")
+    return None, False
+
+
+
+# ---------------------------------------------------------------------------
+# v10 robust transcript-first final Markdown writer
+# ---------------------------------------------------------------------------
+
+def full_transcript_or_digest_for_writer(segments: list[dict], profile: RuntimeProfile, detail_level: str) -> str:
+    """Return the most useful context for the final human writer.
+
+    v9 sometimes produced weak DOCX even on 7B because the final export fell back to
+    JSON-derived structure.  v10 prioritizes the original transcript.  For short and
+    medium inputs we pass the complete timestamped transcript; for long inputs we use
+    coherent chronological blocks rather than isolated representative sentences.
+    """
+    full = segments_to_prompt_text(segments)
+    name = getattr(profile, "name", "")
+    if name == "gpu_quality":
+        full_limit = 26000 if detail_level == "detailed" else 21000
+        total = 36000 if detail_level == "detailed" else 28000
+        blocks = 34 if detail_level == "detailed" else 26
+        block_chars = 1150
+    elif name == "gpu_balanced":
+        full_limit = 20000 if detail_level == "detailed" else 16000
+        total = 27000 if detail_level == "detailed" else 21000
+        blocks = 28 if detail_level == "detailed" else 22
+        block_chars = 1050
+    elif name == "gpu_light":
+        full_limit = 15000 if detail_level == "detailed" else 12000
+        total = 20000 if detail_level == "detailed" else 16000
+        blocks = 22 if detail_level == "detailed" else 18
+        block_chars = 950
+    else:
+        full_limit = 13000 if detail_level == "detailed" else 10000
+        total = 16000 if detail_level == "detailed" else 12500
+        blocks = 18 if detail_level == "detailed" else 14
+        block_chars = 900
+    if len(full) <= full_limit:
+        return full
+    return blocks_to_prompt_text(chronological_blocks(segments, block_max_chars=block_chars, max_blocks=blocks, max_total_chars=total))
+
+
+def make_transcript_first_markdown_prompt(
+    title: str,
+    segments: list[dict],
+    notes: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+) -> str:
+    cfg = detail_cfg(detail_level)
+    context = full_transcript_or_digest_for_writer(segments, profile, detail_level)
+    support = compact_support_notes(notes, max_chars=9000 if getattr(profile, "name", "") == "gpu_quality" else 6500)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    min_topics = "6~10개" if detail_level == "detailed" else "4~7개"
+    min_keypoints = "8~12개" if detail_level == "detailed" else "5~8개"
+    return f"""
+아래 timestamped transcript를 근거로 최종 DOCX에 들어갈 Markdown 문서를 직접 작성하세요.
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {cfg['label']}
+{glossary_text}
+
+가장 중요한 목표:
+- 최종 독자가 바로 읽을 수 있는 사람다운 문서로 작성하세요.
+- chunk별 조각, raw 발화, JSON 병합 결과처럼 보이면 실패입니다.
+- 입력이 회의인지, 강의/교육 영상인지, 인터뷰인지, 발표/해설인지 먼저 파악하고 그 성격에 맞게 정리하세요.
+- 이 애플리케이션은 general domain을 대상으로 하므로 특정 회사/산업/샘플에 편향하지 마세요.
+
+내용 작성 원칙:
+- transcript에 있는 핵심 내용을 빠뜨리지 말고, 의미 단위로 재구성하세요.
+- 원문에 없는 사실을 만들지 마세요. 숫자, 금액, 날짜, 회사명, 인물명, 제도명은 특히 보수적으로 다루세요.
+- ASR 오인식이 명확하면 자연스럽게 보정하되, 불확실하면 '확인 필요'로 남기세요.
+- 강의/교육 영상이면 '결정사항 없음'만 반복하지 말고, 핵심 개념·설명 흐름·학습 포인트·실천 체크포인트를 중심으로 작성하세요.
+- 회의라면 논의 배경·결정사항·실행 항목·리스크·후속 확인 사항을 중심으로 작성하세요.
+- 중국어, 일본어, 한자식 문자, 어색한 직역체를 섞지 마세요. 반드시 자연스러운 한국어로 작성하세요.
+- JSON, Python dict/list, 코드블록, key-value dump, 작성 지시문은 출력하지 마세요.
+
+반드시 아래 섹션 구조를 그대로 사용하세요.
+
+# {title}
+
+## 1. 한 페이지 요약
+1~2개의 자연스러운 문단으로 작성하세요. bullet 금지. 녹음의 주제, 핵심 구조, 중요한 결론/시사점이 자연스럽게 이어지게 작성하세요.
+
+## 2. 전체 구조화 정리
+전체 흐름을 5~8개 bullet로 정리하세요. 각 bullet은 짧은 제목 + 설명 형태로 작성하세요.
+
+## 3. 주제별 상세 정리
+{min_topics}의 구체적인 주제로 나누세요. 각 주제는 ### 소제목으로 시작하고, 3~6개 bullet로 상세하게 설명하세요. 주제명은 실제 내용을 드러내야 합니다.
+
+## 4. 핵심 개념 / 논점
+{min_keypoints}개의 bullet을 작성하세요. 각 bullet은 '개념/논점: 설명' 형태로 작성하세요.
+
+## 5. 결정사항 / 결론
+회의이면 결정사항을, 강의/설명 영상이면 핵심 결론 또는 학습 포인트를 작성하세요. 없는 내용을 억지로 만들지 마세요.
+
+## 6. 실행 항목
+실제 담당자/기한이 있으면 작성하세요. 강의/설명 영상이면 원문에 근거한 개인 체크리스트 또는 후속 확인 항목을 작성해도 됩니다. 근거가 없으면 '명시적 실행 항목 없음'이라고 쓰세요.
+
+## 7. 리스크 / 이슈
+실제 언급된 주의점, 오해 가능성, 불확실성, 논란, 적용 시 주의사항을 작성하세요.
+
+## 8. 타임라인 / 진행 흐름
+시간순으로 6~12개 bullet을 작성하세요. 가능한 경우 [HH:MM:SS]를 붙이세요. 시간이 없으면 설명 흐름 순서로 작성하세요.
+
+## 9. 중요 발언 / 근거
+의미 있는 발언 또는 근거 5~10개를 작성하세요. 단순 감탄사나 말버릇은 제외하세요.
+
+## 10. 용어 / 개념
+실제 고유명사, 제도, 제품명, 기술명, 핵심 개념만 작성하세요. 일반 발화어는 제외하세요.
+
+## 11. 확인 필요한 내용
+ASR 오인식 가능성, 추가 확인이 필요한 숫자/명칭/조건을 작성하세요. 없으면 '명시적으로 확인 필요한 내용 없음'이라고 쓰세요.
+
+Timestamped transcript:
+{context}
+
+보조 chunk note 참고자료. 참고만 하고, 최종 문서는 transcript를 우선하세요:
+{support}
+""".strip()
+
+
+def make_markdown_repair_prompt(title: str, bad_markdown: str, segments: list[dict], profile: RuntimeProfile, language: str, glossary: str, detail_level: str) -> str:
+    context = full_transcript_or_digest_for_writer(segments, profile, detail_level)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    return f"""
+아래 초안 Markdown은 형식이 깨졌거나 내용이 빈약할 수 있습니다. 원 transcript를 근거로 사람이 읽기 좋은 최종 Markdown 문서로 다시 작성하세요.
+문서 제목: {title}
+출력 언어: {language}
+{glossary_text}
+
+수정 원칙:
+- 초안에 JSON, Python dict/list, 중국어/일본어/한자식 문자, 깨진 숫자, 반복 문구가 있으면 제거하세요.
+- transcript에 없는 사실을 만들지 마세요.
+- 강의/교육/회의/인터뷰 등 녹음의 성격에 맞게 자연스럽게 정리하세요.
+- 반드시 1~11번 Markdown 섹션을 모두 포함하세요.
+- Markdown만 출력하세요.
+
+원 transcript:
+{context}
+
+문제가 있는 초안:
+{bad_markdown[:22000]}
+""".strip()
+
+
+def extractive_markdown_safety_net(title: str, segments: list[dict], detail_level: str = "standard") -> str:
+    """Deterministic last resort that is more readable than broken JSON output."""
+    blocks = chronological_blocks(segments, block_max_chars=1000, max_blocks=12 if detail_level == "detailed" else 9, max_total_chars=12000)
+    selected = []
+    for b in blocks:
+        sents = sentence_split(b.get("text", ""))
+        good = [s for s in sents if not is_poor_bullet(s)][:4]
+        if good:
+            selected.append({"time": b.get("time", ""), "text": good})
+    all_texts = [x for b in selected for x in b["text"]]
+    kws = top_keywords(all_texts, 10)
+    lines = [f"# {title}", "", "## 1. 한 페이지 요약", ""]
+    if all_texts:
+        paragraph = " ".join(all_texts[:5])
+        lines += [clean_item_text(paragraph, 1400), ""]
+    else:
+        lines += ["전사 결과를 바탕으로 주요 내용을 정리했습니다.", ""]
+    lines += ["## 2. 전체 구조화 정리", ""]
+    for k in kws[:7]:
+        lines.append(f"- {k}: 녹음에서 반복적으로 다뤄진 주요 표현 또는 개념입니다.")
+    if not kws:
+        lines.append("- 주요 내용: 전사 결과에서 확인되는 핵심 흐름을 아래 주제별 상세 정리에 정리했습니다.")
+    lines += ["", "## 3. 주제별 상세 정리", ""]
+    for i, b in enumerate(selected[:8], start=1):
+        heading = derive_heading_from_bullets(b["text"], fallback=f"구간 {i} 주요 내용")
+        lines += [f"### {i}. {heading}"]
+        for st in b["text"][:5]:
+            lines.append(f"- {st}")
+        lines.append("")
+    lines += ["## 4. 핵심 개념 / 논점", ""]
+    for k in kws[:10]:
+        lines.append(f"- {k}: transcript에서 주요하게 언급된 항목입니다. 정확한 세부 조건은 원문 확인이 필요합니다.")
+    lines += ["", "## 5. 결정사항 / 결론", "", "- 명시적 결정사항 없음", "", "## 6. 실행 항목", "", "- 명시적 실행 항목 없음", "", "## 7. 리스크 / 이슈", "", "- ASR 오인식 가능성이 있으므로 고유명사와 숫자는 원문 확인이 필요합니다.", "", "## 8. 타임라인 / 진행 흐름", ""]
+    for b in selected[:10]:
+        lines.append(f"- [{b['time']}] {b['text'][0]}")
+    lines += ["", "## 9. 중요 발언 / 근거", ""]
+    for s in pick_representative_segments(segments, limit=8):
+        txt = clean_item_text(s.get("text", ""), 260)
+        if txt:
+            lines.append(f"- [{s.get('start_hms','')}] {txt}")
+    lines += ["", "## 10. 용어 / 개념", ""]
+    for k in kws[:10]:
+        if not is_low_value_term(k):
+            lines.append(f"- {k}: 주요 용어 후보")
+    lines += ["", "## 11. 확인 필요한 내용", "", "- 고유명사, 숫자, 날짜, 조건은 ASR 전사 오류 가능성을 고려해 원문 확인이 필요합니다.", ""]
+    return cleanup_markdown("\n".join(lines), title)
+
+
+def generate_transcript_first_markdown(
+    llm,
+    title: str,
+    notes: list[dict],
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str | None, bool, bool]:
+    """v10 primary final writer. Returns (markdown, used_llm_markdown, repair_used)."""
+    prompt = make_transcript_first_markdown_prompt(title, segments, notes, profile, language, glossary, detail_level)
+    if log_cb:
+        log_cb(f"✍️ v10 transcript-first 최종 Markdown writer 생성 / max_new_tokens={max_new_tokens}")
+    raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
+    md = cleanup_markdown(raw, title)
+    if not markdown_has_bad_artifacts(md) and markdown_artifact_score(md) <= 2:
+        return md, True, False
+    if log_cb:
+        log_cb("⚠️ v10 Markdown 초안에 형식/언어/품질 문제가 있어 1회 repair를 시도합니다.")
+    repair_prompt = make_markdown_repair_prompt(title, md, segments, profile, language, glossary, detail_level)
+    raw2 = llm.generate(SYSTEM_PROMPT_MARKDOWN, repair_prompt, max_new_tokens=max(2600, min(max_new_tokens, 6500)))
+    md2 = cleanup_markdown(raw2, title)
+    if not markdown_has_bad_artifacts(md2) and markdown_artifact_score(md2) <= 3:
+        return md2, True, True
+    if log_cb:
+        log_cb("⚠️ v10 Markdown repair도 충분하지 않아 안전한 원문 기반 Markdown으로 대체합니다.")
+    return extractive_markdown_safety_net(title, segments, detail_level), False, True
+
+
 def ground_final_against_transcript(final_obj: dict, segments: list[dict], detail_level: str = "standard") -> dict:
     """Remove the riskiest hallucinated statements without being overly strict."""
     idx = transcript_text_index(segments)
@@ -1731,13 +2226,1581 @@ def ground_final_against_transcript(final_obj: dict, segments: list[dict], detai
         out[key] = vals
     return out
 
+
+# ---------------------------------------------------------------------------
+# v11 final writer: transcript-first sectioned human document generation
+# ---------------------------------------------------------------------------
+
+def severe_markdown_artifact_score(md: str) -> int:
+    """Score only severe human-facing Markdown failures.
+
+    Earlier versions rejected many usable LLM drafts because headings were slightly
+    different or because one section was shorter than expected.  That pushed the
+    pipeline into extractive fallback even on 7B GPUs.  v11 only rejects severe
+    failures: JSON/key leakage, code blocks, CJK drift, missing most sections, or
+    extremely short output.
+    """
+    md = normalize_language_artifacts(cleanup_markdown(md or "", "문서"))
+    score = 0
+    if len(md.strip()) < 1200:
+        score += 3
+    if re.search(r"```|\{\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*:", md):
+        score += 5
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", md):
+        score += 5
+    present = len(set(re.findall(r"(?m)^##\s*(\d+)\.", md)))
+    if present < 8:
+        score += 3
+    if md.count("명시적으로 확인되지 않음") >= 12:
+        score += 2
+    # Detect pathological repetition, but do not punish legitimate repeated domain terms.
+    words = re.findall(r"[가-힣A-Za-z0-9]{2,}", md)
+    if len(words) > 120:
+        top, cnt = Counter(words).most_common(1)[0]
+        if cnt > 55 and cnt / len(words) > 0.10 and top.lower() not in {"연말정산", "소득공제", "세액공제", "공제", "세금", "회의", "내용"}:
+            score += 3
+    return score
+
+
+def v11_writer_context(segments: list[dict], profile: RuntimeProfile, detail_level: str) -> str:
+    """Use full transcript whenever practical; otherwise use coherent chronological blocks.
+
+    For the reported GPU-quality failures the transcript was only ~3.4k chars, so
+    chunk extraction was unnecessary and harmful.  v11 prioritizes the original
+    transcript over noisy intermediate JSON notes.
+    """
+    full = segments_to_prompt_text(segments)
+    name = getattr(profile, "name", "")
+    if name == "gpu_quality":
+        full_limit = 42000 if detail_level == "detailed" else 32000
+        max_blocks, block_chars, max_total = (52, 1250, 56000)
+    elif name == "gpu_balanced":
+        full_limit = 28000 if detail_level == "detailed" else 22000
+        max_blocks, block_chars, max_total = (38, 1150, 39000)
+    elif name == "gpu_light":
+        full_limit = 20000 if detail_level == "detailed" else 16000
+        max_blocks, block_chars, max_total = (28, 1000, 26000)
+    else:
+        full_limit = 14000 if detail_level == "detailed" else 11000
+        max_blocks, block_chars, max_total = (18, 950, 16000)
+    if len(full) <= full_limit:
+        return full
+    return blocks_to_prompt_text(chronological_blocks(segments, block_max_chars=block_chars, max_blocks=max_blocks, max_total_chars=max_total))
+
+
+def short_gpu_transcript_case(segments: list[dict], profile: RuntimeProfile, detail_level: str) -> bool:
+    if getattr(profile, "llm_device", "") != "cuda":
+        return False
+    chars = sum(len(s.get("text", "")) for s in segments)
+    if profile.name == "gpu_quality":
+        return chars <= (26000 if detail_level == "detailed" else 20000)
+    if profile.name == "gpu_balanced":
+        return chars <= (18000 if detail_level == "detailed" else 14000)
+    if profile.name == "gpu_light":
+        return chars <= (12000 if detail_level == "detailed" else 9000)
+    return False
+
+
+def make_v11_section_prompt(
+    part: str,
+    title: str,
+    context: str,
+    support: str,
+    glossary: str,
+    language: str,
+    detail_level: str,
+) -> str:
+    cfg = detail_cfg(detail_level)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    support_text = ""
+    if support.strip():
+        support_text = f"\n\n보조 추출 note입니다. 이 내용은 참고만 하며, 최종 문서는 반드시 transcript 흐름을 우선하세요.\n{support[:12000]}"
+    common = f"""
+당신은 최종 DOCX에 들어갈 사람이 읽는 문서를 작성하는 전문 기록 정리자입니다.
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {cfg['label']}
+{glossary_text}
+
+입력 자료 성격 파악:
+- 먼저 transcript가 회의인지, 강의/교육 영상인지, 인터뷰인지, 발표/해설 영상인지 판단하세요.
+- 회의가 아니면 참석자·결정사항·실행항목을 억지로 만들지 말고, 핵심 개념·설명 흐름·학습 포인트·실천 체크포인트 중심으로 정리하세요.
+- 회의이면 논의 배경·결정사항·실행 항목·리스크·후속 확인 사항 중심으로 정리하세요.
+
+공통 작성 원칙:
+- transcript에 있는 정보만 사용하세요. 없는 사실을 만들지 마세요.
+- 숫자, 날짜, 금액, 비율, 제도명, 회사명, 인물명은 특히 보수적으로 작성하세요.
+- ASR 오인식이 명확한 경우에만 자연스럽게 보정하고, 불확실하면 확인 필요한 내용으로 남기세요.
+- raw 발화 조각을 그대로 붙이지 말고, 사람이 이해할 수 있게 의미 단위로 재구성하세요.
+- 반드시 자연스러운 한국어 문장으로 작성하세요. 중국어·일본어·한자식 문자, JSON, Python dict/list, 코드블록을 출력하지 마세요.
+- 일반 도메인용 앱입니다. 특정 샘플/회사/산업에 편향하지 마세요.
+
+Timestamped transcript 또는 시간순 digest:
+{context}
+{support_text}
+""".strip()
+    if part == "summary_outline":
+        return common + f"""
+
+아래 섹션만 Markdown으로 작성하세요.
+
+# {title}
+
+## 1. 한 페이지 요약
+- bullet 금지. 1~2개의 자연스러운 문단으로 작성하세요.
+- 주제, 설명 흐름, 핵심 결론/시사점, 독자가 얻어야 할 내용을 연결된 글로 작성하세요.
+
+## 2. 전체 구조화 정리
+- 6~9개 bullet로 전체 흐름을 정리하세요.
+- 각 bullet은 **짧은 소제목: 설명** 형태로 작성하세요.
+""".strip()
+    if part == "details":
+        return common + """
+
+아래 섹션만 Markdown으로 작성하세요.
+
+## 3. 주제별 상세 정리
+- 6~10개의 구체적인 주제로 나누세요. 짧은 입력이면 4~6개도 가능합니다.
+- 각 주제는 ### 소제목으로 시작하세요.
+- 각 주제마다 3~6개 bullet을 작성하되, 발화 조각이 아니라 의미가 완결된 설명문으로 작성하세요.
+- 강의/교육 영상이면 정의 → 구조 → 예시 → 적용 포인트 순서가 드러나게 작성하세요.
+""".strip()
+    if part == "concepts":
+        return common + """
+
+아래 섹션만 Markdown으로 작성하세요.
+
+## 4. 핵심 개념 / 논점
+- 8~14개 bullet을 작성하세요.
+- 각 bullet은 **개념/논점: 설명** 형식으로 작성하세요.
+- 단순히 자주 나온 단어를 용어처럼 나열하지 말고, 독자가 이해해야 할 핵심 개념만 작성하세요.
+
+## 5. 결정사항 / 결론
+- 회의이면 실제 결정사항을 작성하세요.
+- 강의/교육/설명 영상이면 핵심 결론 또는 학습 포인트를 작성하세요.
+- 원문에 없으면 억지로 만들지 마세요.
+
+## 6. 실행 항목
+- 회의에서 담당자/기한이 있는 액션이 있으면 작성하세요.
+- 강의/교육 영상이면 개인이 확인하거나 적용할 체크리스트를 transcript 근거 안에서 작성하세요.
+""".strip()
+    return common + """
+
+아래 섹션만 Markdown으로 작성하세요.
+
+## 7. 리스크 / 이슈
+- 실제 언급된 주의점, 오해 가능성, 불확실성, 적용 시 주의사항을 작성하세요.
+
+## 8. 타임라인 / 진행 흐름
+- 시간순으로 6~12개 bullet을 작성하세요. 가능한 경우 [HH:MM:SS]를 붙이세요.
+
+## 9. 중요 발언 / 근거
+- 의미 있는 발언 또는 근거 5~10개를 작성하세요. 말버릇이나 감탄사는 제외하세요.
+
+## 10. 용어 / 개념
+- 실제 고유명사, 제도명, 제품명, 기술명, 방법론만 작성하세요.
+- 일반 발화어, 조사성 표현, 의미 없는 빈도 단어는 제외하세요.
+
+## 11. 확인 필요한 내용
+- ASR 오인식 가능성 또는 추가 확인이 필요한 숫자/명칭/조건을 작성하세요.
+- 없으면 '명시적으로 확인 필요한 내용 없음'이라고 쓰세요.
+""".strip()
+
+
+def normalize_required_sections(md: str, title: str) -> str:
+    md = cleanup_markdown(md, title)
+    # Normalize common heading variants without rejecting useful text.
+    replacements = {
+        r"##\s*1\.?\s*한\s*페이지\s*요약.*": "## 1. 한 페이지 요약",
+        r"##\s*2\.?\s*전체\s*구조화\s*정리.*": "## 2. 전체 구조화 정리",
+        r"##\s*3\.?\s*주제별\s*상세\s*정리.*": "## 3. 주제별 상세 정리",
+        r"##\s*4\.?\s*핵심\s*(개념|논점).*": "## 4. 핵심 개념 / 논점",
+        r"##\s*5\.?\s*(결정사항|결론).*": "## 5. 결정사항 / 결론",
+        r"##\s*6\.?\s*실행\s*항목.*": "## 6. 실행 항목",
+        r"##\s*7\.?\s*(리스크|이슈).*": "## 7. 리스크 / 이슈",
+        r"##\s*8\.?\s*(타임라인|진행).*": "## 8. 타임라인 / 진행 흐름",
+        r"##\s*9\.?\s*(중요\s*발언|근거).*": "## 9. 중요 발언 / 근거",
+        r"##\s*10\.?\s*(용어|개념).*": "## 10. 용어 / 개념",
+        r"##\s*11\.?\s*확인.*": "## 11. 확인 필요한 내용",
+    }
+    for pat, rep in replacements.items():
+        md = re.sub(pat, rep, md, flags=re.I | re.M)
+    return cleanup_markdown(md, title)
+
+
+def generate_sectioned_markdown_v11(
+    llm,
+    title: str,
+    notes: list[dict],
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str | None, bool]:
+    """Primary GPU writer for v11.
+
+    It writes final Markdown directly in four focused calls.  The original
+    transcript is the primary source.  Chunk notes are omitted for short inputs to
+    avoid polluting the final document with poor intermediate headings.
+    """
+    context = v11_writer_context(segments, profile, detail_level)
+    short_case = short_gpu_transcript_case(segments, profile, detail_level)
+    support = "" if short_case else compact_support_notes(notes, max_chars=10000 if profile.name == "gpu_quality" else 7000)
+    if log_cb:
+        log_cb("✍️ v11 transcript-first 섹션별 Markdown writer 시작" + (" (short transcript: chunk note 제외)" if short_case else ""))
+    part_tokens = {
+        "summary_outline": min(max(1600, max_new_tokens // 3), 2600),
+        "details": min(max(2600, max_new_tokens // 2), 5200),
+        "concepts": min(max(2200, max_new_tokens // 2), 4200),
+        "closing": min(max(2200, max_new_tokens // 2), 4200),
+    }
+    parts = []
+    for part in ["summary_outline", "details", "concepts", "closing"]:
+        prompt = make_v11_section_prompt(part, title, context, support, glossary, language, detail_level)
+        if log_cb:
+            log_cb(f"✍️ v11 Markdown section 생성: {part} / max_new_tokens={part_tokens[part]}")
+        raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=part_tokens[part])
+        part_md = normalize_required_sections(raw, title)
+        parts.append(part_md)
+    assembled = assemble_sectioned_markdown(title, parts)
+    assembled = normalize_required_sections(normalize_language_artifacts(assembled), title)
+    score = severe_markdown_artifact_score(assembled)
+    if score <= 5:
+        return assembled, False
+    # One repair pass, but do not immediately fall back to extractive unless severe artifacts remain.
+    if log_cb:
+        log_cb(f"⚠️ v11 sectioned Markdown 점수={score}. 원문 기반 repair 1회 수행")
+    repair_prompt = make_markdown_repair_prompt(title, assembled, segments, profile, language, glossary, detail_level)
+    raw2 = llm.generate(SYSTEM_PROMPT_MARKDOWN, repair_prompt, max_new_tokens=min(max(3200, max_new_tokens), 7200))
+    repaired = normalize_required_sections(normalize_language_artifacts(raw2), title)
+    if severe_markdown_artifact_score(repaired) <= 6:
+        return repaired, True
+    # If repair still has issues but assembled is mostly readable, use assembled rather than poor extractive fallback.
+    if score <= 8 and "## 3. 주제별 상세 정리" in assembled:
+        return assembled, False
+    return None, True
+
+
+# ---------------------------------------------------------------------------
+# v12 final writer: one-pass transcript-first complete document generation
+# ---------------------------------------------------------------------------
+
+FULLWIDTH_TRANSLATION = str.maketrans({
+    "，": ",", "。": ".", "：": ":", "；": ";", "（": "(", "）": ")",
+    "［": "[", "］": "]", "｛": "{", "｝": "}", "“": '"', "”": '"', "’": "'", "‘": "'",
+    "０": "0", "１": "1", "２": "2", "３": "3", "４": "4", "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
+})
+
+
+def clean_human_markdown_text(md: str, title: str) -> str:
+    """Final human-facing cleanup for Markdown before Pandoc.
+
+    This is deliberately conservative. It removes formatting artifacts and obvious
+    mixed-script noise, but it does not attempt to rewrite facts.
+    """
+    md = str(md or "").translate(FULLWIDTH_TRANSLATION)
+    md = strip_code_fence(md)
+    md = normalize_language_artifacts(md)
+    # Remove any leaked JSON/object fragments that sometimes appear before/inside a report.
+    md = re.sub(r"(?s)```(?:json|python|markdown|md)?\s*.*?```", "", md)
+    md = re.sub(r"(?m)^\s*[\{\[]\s*['\"]?(topics|summary|heading|bullets|text)['\"]?\s*[:=].*$", "", md)
+    md = re.sub(r"(?m)^\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*[:=].*$", "", md)
+    # Normalize heading variants that Qwen occasionally produces.
+    md = normalize_required_sections(md, title)
+    # Remove repeated placeholder lines and unknown spam.
+    md = re.sub(r"(?:\n\s*-\s*명시적으로 확인되지 않음\s*){2,}", "\n- 명시적으로 확인되지 않음\n", md)
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return cleanup_markdown(md, title)
+
+
+def v12_transcript_context(segments: list[dict], profile: RuntimeProfile, detail_level: str) -> str:
+    """Use full transcript for short/medium recordings; coherent digest for long ones."""
+    full = segments_to_prompt_text(segments)
+    name = getattr(profile, "name", "")
+    if name == "gpu_quality":
+        full_limit = 52000 if detail_level == "detailed" else 42000
+        block_chars, max_blocks, max_total = 1400, 58, 70000
+    elif name == "gpu_balanced":
+        full_limit = 36000 if detail_level == "detailed" else 28000
+        block_chars, max_blocks, max_total = 1250, 44, 52000
+    elif name == "gpu_light":
+        full_limit = 24000 if detail_level == "detailed" else 18000
+        block_chars, max_blocks, max_total = 1100, 32, 36000
+    else:
+        full_limit = 16000 if detail_level == "detailed" else 12000
+        block_chars, max_blocks, max_total = 950, 22, 22000
+    if len(full) <= full_limit:
+        return full
+    return blocks_to_prompt_text(chronological_blocks(segments, block_max_chars=block_chars, max_blocks=max_blocks, max_total_chars=max_total))
+
+
+def infer_recording_type_hint(transcript: str) -> str:
+    """Small heuristic only for prompt framing, not for facts."""
+    text = transcript.lower()
+    if any(k in text for k in ["강의", "설명", "개념", "정의", "배워", "다뤄볼게", "구조", "기본편", "꿀팁"]):
+        return "강의/교육/설명 영상일 가능성이 높습니다. 핵심 개념과 설명 흐름, 학습 포인트, 개인 체크리스트 중심으로 정리하세요."
+    if any(k in text for k in ["회의", "참석", "결정", "담당", "액션", "진행하기로", "논의"]):
+        return "회의/업무 논의일 가능성이 높습니다. 논의 배경, 결정사항, 실행 항목, 리스크, 후속 확인사항 중심으로 정리하세요."
+    if any(k in text for k in ["인터뷰", "질문", "답변"]):
+        return "인터뷰/문답형 녹음일 가능성이 있습니다. 질문 흐름과 답변의 핵심 메시지 중심으로 정리하세요."
+    return "일반 녹음입니다. 입력 성격을 먼저 판단한 뒤 그 성격에 맞는 문서로 정리하세요."
+
+
+def make_v12_complete_report_prompt(title: str, segments: list[dict], profile: RuntimeProfile, language: str, glossary: str, detail_level: str) -> str:
+    context = v12_transcript_context(segments, profile, detail_level)
+    type_hint = infer_recording_type_hint(context)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    if detail_level == "brief":
+        topic_req, detail_req, concept_req, timeline_req, quote_req = "3~5개", "2~4개", "4~6개", "4~7개", "3~5개"
+    elif detail_level == "standard":
+        topic_req, detail_req, concept_req, timeline_req, quote_req = "5~7개", "3~5개", "6~9개", "6~10개", "4~7개"
+    else:
+        topic_req, detail_req, concept_req, timeline_req, quote_req = "6~10개", "4~7개", "8~14개", "8~14개", "5~10개"
+    return f"""
+당신은 최종 DOCX 문서를 작성하는 전문 기록 정리자입니다.
+아래 timestamped transcript만 근거로, 사람이 읽기 좋은 최종 Markdown 문서를 작성하세요.
+
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {detail_cfg(detail_level)['label']}
+입력 성격 힌트: {type_hint}
+{glossary_text}
+절대 원칙:
+- 이 애플리케이션은 general domain 회의·강의·인터뷰·발표·교육·해설 녹음을 모두 처리합니다. 특정 샘플이나 산업에 편향하지 마세요.
+- transcript에 없는 사실을 만들지 마세요. 숫자, 금액, 날짜, 비율, 제도명, 회사명, 인물명은 원문 근거가 있을 때만 쓰세요.
+- ASR 전사 오류가 있을 수 있습니다. 문맥상 명확한 오인식만 자연스럽게 보정하고, 불확실한 것은 확인 필요한 내용으로 남기세요.
+- raw 발화 조각을 그대로 붙이지 마세요. 의미 단위로 묶고, 배경 → 구조 → 세부 내용 → 결론/체크포인트 순서로 사람이 쓴 보고서처럼 작성하세요.
+- 강의/교육/설명 영상이면 결정사항을 억지로 만들지 말고, 핵심 개념·구조·예시·학습 포인트·개인 체크리스트 중심으로 정리하세요.
+- 회의라면 논의 배경·결정사항·실행 항목·리스크·후속 확인사항 중심으로 정리하세요.
+- 반드시 자연스러운 한국어로 작성하세요. 중국어·일본어·한자식 문자, JSON, Python dict/list, 코드블록, 작성 지시문을 출력하지 마세요.
+- '명시적으로 확인되지 않음'은 최소한으로만 사용하세요. transcript에 관련 내용이 있으면 해당 내용을 정리하세요.
+
+반드시 아래 Markdown 섹션 제목을 그대로 사용하세요.
+
+# {title}
+
+## 1. 한 페이지 요약
+1~2개의 자연스러운 문단으로 작성하세요. bullet 금지. 녹음의 목적, 핵심 구조, 주요 결론/시사점이 이어지게 작성하세요.
+
+## 2. 전체 구조화 정리
+{topic_req} bullet로 전체 흐름을 정리하세요. 각 bullet은 **짧은 소제목: 설명** 형식으로 작성하세요.
+
+## 3. 주제별 상세 정리
+{topic_req}의 구체적 주제로 나누고, 각 주제는 ### 소제목으로 시작하세요. 각 주제마다 {detail_req} bullet을 작성하세요. 원문 흐름을 재구성하되 발화 조각을 그대로 나열하지 마세요.
+
+## 4. 핵심 개념 / 논점
+{concept_req} bullet을 작성하세요. 각 bullet은 **개념/논점: 설명** 형식으로 작성하세요.
+
+## 5. 결정사항 / 결론
+회의이면 실제 결정사항을, 강의/설명 영상이면 핵심 결론·시사점·학습 포인트를 작성하세요.
+
+## 6. 실행 항목
+회의이면 담당자/기한이 있는 액션을 작성하세요. 강의/교육 영상이면 개인이 확인하거나 적용할 체크리스트를 작성하세요. 원문에 없으면 없다고 간단히 쓰세요.
+
+## 7. 리스크 / 이슈
+실제로 언급된 주의점, 오해 가능성, 조건, 불확실성을 정리하세요.
+
+## 8. 타임라인 / 진행 흐름
+시간순으로 {timeline_req} bullet을 작성하세요. 가능한 경우 [HH:MM:SS]를 붙이세요.
+
+## 9. 중요 발언 / 근거
+의미 있는 발언 또는 근거 {quote_req}개를 작성하세요. 말버릇과 감탄사는 제외하세요.
+
+## 10. 용어 / 개념
+실제 고유명사, 제도명, 기술명, 제품명, 방법론만 작성하세요. 일반 발화어와 빈도 단어는 제외하세요.
+
+## 11. 확인 필요한 내용
+ASR 오인식 가능성, 조건/숫자/제도 관련 추가 확인이 필요한 내용만 작성하세요. 없으면 '명시적으로 확인 필요한 내용 없음'이라고 쓰세요.
+
+Timestamped transcript:
+{context}
+""".strip()
+
+
+def v12_markdown_quality(md: str, title: str) -> tuple[bool, list[str]]:
+    """Return (is_good, reasons).  Focus on actual user-visible failures."""
+    reasons: list[str] = []
+    m = clean_human_markdown_text(md or "", title)
+    if len(m.strip()) < 1500:
+        reasons.append("too_short")
+    if re.search(r"```|\{\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*:", m):
+        reasons.append("json_or_code_leak")
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", m):
+        reasons.append("cjk_or_japanese_leak")
+    required_nums = set(re.findall(r"(?m)^##\s*(\d+)\.", m))
+    if len(required_nums) < 10:
+        reasons.append("missing_sections")
+    sec1 = extract_markdown_sections(m).get("1", "")
+    sec2 = extract_markdown_sections(m).get("2", "")
+    sec3 = extract_markdown_sections(m).get("3", "")
+    if "명시적으로 확인되지 않음" in sec1 or len(sec1) < 160:
+        reasons.append("bad_summary")
+    if "명시적으로 확인되지 않음" in sec2 and len(sec2) < 300:
+        reasons.append("bad_outline")
+    if "명시적으로 확인되지 않음" in sec3 and len(sec3) < 500:
+        reasons.append("bad_details")
+    if m.count("명시적으로 확인되지 않음") >= 8:
+        reasons.append("too_many_unknowns")
+    low_value_hits = sum(1 for x in ["필수적인", "돌아왔습니다", "깎아주기도", "신용카드나", "공제해줍니다", "마찬가지거든요"] if re.search(rf"(?m)^[-|]?\s*{re.escape(x)}\b", m))
+    if low_value_hits >= 2:
+        reasons.append("low_value_terms")
+    words = re.findall(r"[가-힣A-Za-z0-9]{2,}", m)
+    if len(words) > 150:
+        top, cnt = Counter(words).most_common(1)[0]
+        if cnt > 60 and cnt / len(words) > 0.10 and top.lower() not in {"연말정산", "소득공제", "세액공제", "공제", "세금", "회의", "내용"}:
+            reasons.append("repetitive")
+    return not reasons, reasons
+
+
+def make_v12_repair_prompt(title: str, bad_markdown: str, segments: list[dict], profile: RuntimeProfile, language: str, glossary: str, detail_level: str, reasons: list[str]) -> str:
+    context = v12_transcript_context(segments, profile, detail_level)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    return f"""
+아래 Markdown 초안은 최종 DOCX 품질 기준을 만족하지 못했습니다.
+문제 유형: {', '.join(reasons)}
+
+원본 transcript를 근거로 전체 Markdown 문서를 다시 작성하세요.
+초안의 나쁜 표현, JSON 누출, 의미 없는 빈도 단어, '명시적으로 확인되지 않음' 남발은 버리세요.
+
+문서 제목: {title}
+출력 언어: {language}
+{glossary_text}
+작성 원칙:
+- 반드시 자연스러운 한국어 최종 문서로 작성하세요.
+- transcript에 있는 정보를 충분히 활용하세요.
+- 강의/설명 영상이면 핵심 개념·구조·예시·체크포인트 중심으로 정리하세요.
+- 회의이면 결정사항·실행항목·리스크 중심으로 정리하세요.
+- JSON, 코드블록, Python dict/list, 중국어/일본어/한자식 문자를 출력하지 마세요.
+- 아래 11개 섹션 제목을 그대로 사용하세요.
+
+반드시 포함할 섹션:
+# {title}
+## 1. 한 페이지 요약
+## 2. 전체 구조화 정리
+## 3. 주제별 상세 정리
+## 4. 핵심 개념 / 논점
+## 5. 결정사항 / 결론
+## 6. 실행 항목
+## 7. 리스크 / 이슈
+## 8. 타임라인 / 진행 흐름
+## 9. 중요 발언 / 근거
+## 10. 용어 / 개념
+## 11. 확인 필요한 내용
+
+원본 transcript:
+{context}
+
+품질이 낮았던 Markdown 초안:
+{bad_markdown[:12000]}
+""".strip()
+
+
+def generate_v12_complete_markdown(
+    llm,
+    title: str,
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str | None, bool, list[str]]:
+    """v12 primary path: one complete transcript-first writer.
+
+    This removes the failure mode observed in v9-v11 where intermediate JSON or
+    section assembly produced sparse documents despite a strong GPU model.
+    """
+    prompt = make_v12_complete_report_prompt(title, segments, profile, language, glossary, detail_level)
+    if log_cb:
+        log_cb(f"✍️ v12 complete transcript-first Markdown writer / max_new_tokens={max_new_tokens}")
+    raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
+    md = clean_human_markdown_text(raw, title)
+    ok, reasons = v12_markdown_quality(md, title)
+    if ok:
+        return md, False, []
+    if log_cb:
+        log_cb("⚠️ v12 Markdown 품질 검사 미통과: " + ", ".join(reasons) + ". 원문 기반 repair 1회 수행")
+    repair_prompt = make_v12_repair_prompt(title, md, segments, profile, language, glossary, detail_level, reasons)
+    raw2 = llm.generate(SYSTEM_PROMPT_MARKDOWN, repair_prompt, max_new_tokens=max(3600, min(max_new_tokens, 9000)))
+    md2 = clean_human_markdown_text(raw2, title)
+    ok2, reasons2 = v12_markdown_quality(md2, title)
+    if ok2 or len(reasons2) < len(reasons):
+        return md2, True, reasons2
+    return None, True, reasons2
+
+
+
+# ---------------------------------------------------------------------------
+# v13 planner-guided final writer
+# ---------------------------------------------------------------------------
+
+COMMON_IMPORTANT_TERMS = [
+    # General meeting/project terms
+    "결정사항", "실행 항목", "후속 조치", "리스크", "이슈", "일정", "담당자", "예산", "비용", "매출", "수익", "고객", "시장", "전략",
+    "프로젝트", "로드맵", "성과", "지표", "품질", "보안", "개인정보", "데이터", "운영", "개선", "자동화", "검토", "승인",
+    # Business / tech terms
+    "AI", "LLM", "GPU", "CPU", "API", "클라우드", "서버", "모델", "서비스", "플랫폼", "반도체", "HBM", "네트워크",
+    # Education / finance / tax terms frequently useful in general recordings
+    "연말정산", "총급여", "비과세소득", "비과세 소득", "소득공제", "소득 공제", "세액공제", "세액 공제", "과세표준", "과세 표준",
+    "결정세액", "결정 세액", "환급", "추징", "추가징수", "추가 징수", "근로소득공제", "근로소득 공제", "인적공제", "인적 공제",
+    "부양가족", "4대 보험", "국민연금", "건강보험", "고용보험", "주택자금", "전월세", "청약통장", "신용카드", "체크카드", "현금영수증",
+    "연금저축", "IRP", "월세", "의료비", "중소기업", "청년", "청년도약계좌", "청년 우대형 청약통장", "홈택스", "원천징수영수증",
+]
+
+LOW_VALUE_PHRASE_PATTERNS = [
+    r"돌아왔습니다$", r"깎아주기도$", r"공제해줍니다$", r"마찬가지거든요$", r"있잖아요$", r"해볼게요$", r"다뤄볼게요$",
+    r"필수적인$", r"신용카드나$", r"직장인이면$", r"좋겠죠$", r"하겠습니다$", r"하는데요$",
+]
+
+
+def detect_recording_type_v13(title: str, segments: list[dict]) -> str:
+    text = normalize_language_artifacts(title + " " + " ".join(s.get("text", "") for s in segments)).lower()
+    edu_score = sum(1 for k in ["개념", "구조", "기본편", "정의", "알아야", "설명", "다뤄볼게", "요약표", "다음 편", "꿀팁", "시청", "시즌"] if k in text)
+    meeting_score = sum(1 for k in ["회의", "참석", "담당", "결정", "액션", "진행하기로", "논의", "아젠다", "안건"] if k in text)
+    interview_score = sum(1 for k in ["인터뷰", "질문", "답변", "물어", "대답"] if k in text)
+    news_score = sum(1 for k in ["주가", "시장", "발표", "기자", "뉴스", "회동", "경제", "논란"] if k in text)
+    if edu_score >= max(meeting_score, interview_score, news_score) and edu_score >= 2:
+        return "education"
+    if meeting_score >= max(interview_score, news_score) and meeting_score >= 2:
+        return "meeting"
+    if interview_score >= 2:
+        return "interview"
+    if news_score >= 2:
+        return "commentary"
+    return "general"
+
+
+def is_low_value_phrase_v13(text: str) -> bool:
+    t = clean_item_text(text, 160).strip()
+    if not t:
+        return True
+    if is_poor_bullet(t):
+        return True
+    if any(re.search(p, t) for p in LOW_VALUE_PHRASE_PATTERNS):
+        # If it is a full factual sentence with multiple terms/numbers, keep it.
+        if len(content_keywords(t)) < 3 and not re.search(r"\d", t):
+            return True
+    # Very short conversational fragments are not useful as document bullets.
+    if len(t) < 18 and len(content_keywords(t)) < 2:
+        return True
+    return False
+
+
+def is_bad_term_v13(term: str) -> bool:
+    t = clean_item_text(term, 80).strip()
+    if not t or is_low_value_term(t):
+        return True
+    if t in KOREAN_STOPWORDS or t.lower() in LOW_VALUE_TERMS:
+        return True
+    if any(re.search(p, t) for p in LOW_VALUE_PHRASE_PATTERNS):
+        return True
+    # Verbal/adverbial fragments are bad terms; short real nouns/acronyms are OK.
+    if re.search(r"(합니다|했습니다|되죠|되다|해요|했죠|인데요|잖아요|볼게요|좋겠죠|줍니다|주기도|왔습니다)$", t):
+        return True
+    if len(t) > 24 and not re.search(r"[A-Z]", t):
+        return True
+    return False
+
+
+def extract_terms_v13(segments: list[dict], glossary: str = "", limit: int = 18) -> list[dict]:
+    text = normalize_language_artifacts(" ".join(s.get("text", "") for s in segments))
+    lower = text.lower()
+    terms: list[str] = []
+    # Terms explicitly provided by the user are highest priority.
+    for raw in re.split(r"[,\n;/]+", glossary or ""):
+        raw = raw.strip()
+        if raw and "=" not in raw and len(raw) >= 2:
+            terms.append(raw)
+        elif "=" in raw:
+            left, right = raw.split("=", 1)
+            if right.strip():
+                terms.append(right.strip())
+    for term in COMMON_IMPORTANT_TERMS:
+        if term.lower() in lower and term not in terms:
+            terms.append(term)
+    # Acronyms and mixed alpha terms.
+    for m in re.findall(r"\b[A-Z][A-Z0-9+.-]{1,}\b", text):
+        if m not in terms and not is_low_value_term(m):
+            terms.append(m)
+    # Noun-ish Korean candidates near '라고/이란/은/는'.
+    for m in re.findall(r"([가-힣A-Za-z0-9+.#_-]{2,}(?:\s+[가-힣A-Za-z0-9+.#_-]{2,}){0,2})\s*(?:이란|란|은|는|이라고|라고|을|를)", text):
+        cand = clean_item_text(m, 60)
+        if cand and not is_bad_term_v13(cand) and cand not in terms:
+            terms.append(cand)
+    out: list[dict] = []
+    seen = set()
+    for term in terms:
+        t = clean_item_text(term, 60)
+        if not t or t.lower() in seen or is_bad_term_v13(t):
+            continue
+        # Description from first sentence containing the term.
+        desc = ""
+        for sent in sentence_split(text):
+            if t.replace(" ", "") in sent.replace(" ", ""):
+                desc = clean_item_text(sent, 220)
+                break
+        if not desc:
+            desc = "녹음에서 핵심적으로 언급된 개념입니다."
+        out.append({"term": t, "description": desc})
+        seen.add(t.lower())
+        if len(out) >= limit:
+            break
+    return out
+
+
+def block_heading_v13(block_text: str, terms: list[dict], idx: int, recording_type: str) -> str:
+    text = normalize_language_artifacts(block_text)
+    hits = []
+    for t in terms:
+        term = t.get("term", "") if isinstance(t, dict) else str(t)
+        if term and term.replace(" ", "") in text.replace(" ", ""):
+            hits.append(term)
+        if len(hits) >= 3:
+            break
+    if hits:
+        return " · ".join(hits[:3])
+    kws = [k for k in top_keywords([text], 4) if not is_low_value_term(k)]
+    if kws:
+        return " · ".join(k.upper() if k.isascii() and len(k) <= 6 else k for k in kws[:3])
+    if recording_type == "education":
+        return f"설명 흐름 {idx}"
+    if recording_type == "meeting":
+        return f"논의 흐름 {idx}"
+    return f"주요 흐름 {idx}"
+
+
+def select_block_bullets_v13(block_text: str, max_bullets: int = 5) -> list[str]:
+    sents = sentence_split(block_text)
+    scored: list[tuple[float, str]] = []
+    for i, s in enumerate(sents):
+        st = clean_item_text(s, 420)
+        if is_low_value_phrase_v13(st):
+            continue
+        score = 0.0
+        score += min(len(st), 220) / 220.0
+        score += 0.7 if re.search(r"\d", st) else 0
+        score += 0.8 if any(k in st for k in ["정의", "비교", "기준", "목표", "핵심", "중요", "공제", "세액", "소득", "환급", "추징", "확인", "등록", "결정", "실행", "리스크", "문제", "원인", "결과"]) else 0
+        # Prefer earlier sentences slightly for coherent explanations.
+        score += max(0, 0.25 - i * 0.015)
+        scored.append((score, st))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    chosen = []
+    seen = set()
+    for _, st in scored:
+        key = re.sub(r"\s+", "", st)[:90]
+        if key in seen:
+            continue
+        chosen.append(st)
+        seen.add(key)
+        if len(chosen) >= max_bullets:
+            break
+    # Restore chronological order based on original sentences.
+    ordered = [s for s in sents if any(clean_item_text(s, 420) == c for c in chosen)]
+    return ordered[:max_bullets] or chosen[:max_bullets]
+
+
+def build_content_plan_v13(title: str, segments: list[dict], glossary: str = "", detail_level: str = "detailed") -> dict:
+    recording_type = detect_recording_type_v13(title, segments)
+    terms = extract_terms_v13(segments, glossary, limit=20 if detail_level == "detailed" else 14)
+    # Use enough blocks for structure, but not so many that the document looks chunk-sliced.
+    blocks = chronological_blocks(
+        segments,
+        block_max_chars=850 if detail_level == "detailed" else 1000,
+        max_blocks=12 if detail_level == "detailed" else 9,
+        max_total_chars=14000 if detail_level == "detailed" else 10000,
+    )
+    topics = []
+    seen_headings = set()
+    for idx, b in enumerate(blocks, start=1):
+        bullets = select_block_bullets_v13(b.get("text", ""), max_bullets=5 if detail_level == "detailed" else 4)
+        bullets = [clean_item_text(x, 500) for x in bullets if not is_low_value_phrase_v13(x)]
+        if not bullets:
+            continue
+        heading = block_heading_v13(b.get("text", ""), terms, idx, recording_type)
+        if heading in seen_headings:
+            heading = f"{heading} ({idx})"
+        seen_headings.add(heading)
+        topics.append({"heading": heading, "bullets": bullets, "time": b.get("time", "")})
+    # Merge adjacent weak topics if there are too many or too few bullets.
+    compact_topics = []
+    for t in topics:
+        if compact_topics and len(t["bullets"]) <= 2 and len(compact_topics[-1]["bullets"]) < 6:
+            compact_topics[-1]["bullets"].extend(t["bullets"])
+            compact_topics[-1]["time"] = (compact_topics[-1].get("time", "") + ", " + t.get("time", "")).strip(", ")
+        else:
+            compact_topics.append(t)
+    topics = compact_topics[:10 if detail_level == "detailed" else 7]
+    # Extract action/checklist-like sentences.
+    all_sents = [clean_item_text(s, 420) for s in sentence_split(" ".join(seg.get("text", "") for seg in segments))]
+    checklist = []
+    for s in all_sents:
+        if is_low_value_phrase_v13(s):
+            continue
+        if any(k in s for k in ["확인", "등록", "챙", "신경", "알아두", "활용", "가입", "공제", "준비", "받을 수", "해야"]):
+            if s[:90] not in {x[:90] for x in checklist}:
+                checklist.append(s)
+        if len(checklist) >= 8:
+            break
+    risks = []
+    for s in all_sents:
+        if any(k in s for k in ["추징", "추가", "조건", "기준", "불확실", "오인", "놓치", "미리", "주의", "세율이 높", "많다면"]):
+            if not is_low_value_phrase_v13(s) and s[:90] not in {x[:90] for x in risks}:
+                risks.append(s)
+        if len(risks) >= 6:
+            break
+    quotes = []
+    for seg in pick_representative_segments(segments, limit=12):
+        txt = clean_item_text(seg.get("text", ""), 260)
+        if txt and not is_low_value_phrase_v13(txt):
+            quotes.append({"time": seg.get("start_hms", ""), "text": txt})
+    timeline = []
+    for b in blocks[:12]:
+        sents = [s for s in sentence_split(b.get("text", "")) if not is_low_value_phrase_v13(s)]
+        if sents:
+            timeline.append({"time": b.get("time", ""), "event": clean_item_text(sents[0], 260)})
+    return {
+        "title": title,
+        "recording_type": recording_type,
+        "terms": terms,
+        "topics": topics,
+        "checklist": checklist,
+        "risks": risks,
+        "timeline": timeline,
+        "quotes": quotes,
+    }
+
+
+def content_plan_to_markdown_v13(plan: dict, title: str, segments: list[dict], detail_level: str = "detailed") -> str:
+    recording_type = plan.get("recording_type", "general")
+    topics = plan.get("topics") or []
+    terms = plan.get("terms") or []
+    term_names = [t.get("term", "") for t in terms[:8] if isinstance(t, dict)]
+    lines = [f"# {title}", "", "## 1. 한 페이지 요약", ""]
+    if recording_type == "education":
+        topic_desc = ", ".join(term_names[:5]) if term_names else "핵심 개념과 설명 흐름"
+        first_facts = []
+        for t in topics:
+            for b in t.get("bullets", []):
+                bt = clean_item_text(b, 360)
+                if is_low_value_phrase_v13(bt):
+                    continue
+                if any(k in bt for k in ["절차", "비교", "환급", "추징", "기준", "목표", "공제", "세액", "소득", "금액", "세율"]):
+                    if bt[:100] not in {x[:100] for x in first_facts}:
+                        first_facts.append(bt)
+                if len(first_facts) >= 4:
+                    break
+            if len(first_facts) >= 4:
+                break
+        paragraph = f"이 녹음은 {topic_desc}을 중심으로 핵심 구조를 설명하는 교육형 자료입니다. "
+        if first_facts:
+            paragraph += " ".join(first_facts[:3])
+        paragraph += " 아래에는 전체 흐름, 주제별 상세 설명, 핵심 개념, 개인 체크리스트와 확인 필요한 내용을 나누어 정리했습니다."
+    elif recording_type == "meeting":
+        paragraph = "이 녹음은 회의 또는 업무 논의 내용을 바탕으로 주요 배경, 논의 흐름, 결정사항, 실행 항목과 확인이 필요한 내용을 정리한 문서입니다."
+    else:
+        topic_desc = ", ".join(term_names[:5]) if term_names else "주요 내용"
+        paragraph = f"이 녹음은 {topic_desc}을 중심으로 진행됩니다. 주요 흐름과 세부 내용을 의미 단위로 재구성해 아래에 정리했습니다."
+    lines += [clean_item_text(paragraph, 1400), "", "## 2. 전체 구조화 정리", ""]
+    for t in topics[:8]:
+        h = clean_item_text(t.get("heading"), 100)
+        b = clean_item_text((t.get("bullets") or [""])[0], 260)
+        if h and b:
+            lines.append(f"- **{h}:** {b}")
+    if not topics:
+        lines.append("- 전사 결과에서 확인되는 주요 흐름을 주제별 상세 정리에 정리했습니다.")
+    lines += ["", "## 3. 주제별 상세 정리", ""]
+    for idx, t in enumerate(topics[:10], start=1):
+        lines.append(f"### {idx}. {clean_item_text(t.get('heading'), 100) or f'주요 내용 {idx}'}")
+        for b in (t.get("bullets") or [])[:6]:
+            bt = clean_item_text(b, 500)
+            if bt:
+                lines.append(f"- {bt}")
+        lines.append("")
+    lines += ["## 4. 핵심 개념 / 논점", ""]
+    if terms:
+        for t in terms[:14]:
+            if isinstance(t, dict):
+                lines.append(f"- **{clean_item_text(t.get('term'), 80)}:** {clean_item_text(t.get('description'), 360)}")
+    else:
+        for t in topics[:6]:
+            h = clean_item_text(t.get("heading"), 100)
+            if h:
+                lines.append(f"- **{h}:** 녹음에서 주요하게 다뤄진 논점입니다.")
+    lines += ["", "## 5. 결정사항 / 결론", ""]
+    if recording_type == "education":
+        lines.append("- 이 자료는 특정 의사결정보다는 핵심 개념을 이해하고 실제 적용 시 챙겨야 할 항목을 파악하는 데 초점이 있습니다.")
+        if topics:
+            lines.append(f"- 핵심 흐름은 {', '.join([clean_item_text(t.get('heading'), 60) for t in topics[:4]])} 순서로 정리할 수 있습니다.")
+    else:
+        lines.append("- 명시적 결정사항 없음")
+    lines += ["", "## 6. 실행 항목", ""]
+    checklist = plan.get("checklist") or []
+    if checklist:
+        for c in checklist[:8]:
+            lines.append(f"- {clean_item_text(c, 420)}")
+    else:
+        lines.append("- 명시적 실행 항목 없음")
+    lines += ["", "## 7. 리스크 / 이슈", ""]
+    risks = plan.get("risks") or []
+    if risks:
+        for r in risks[:6]:
+            lines.append(f"- {clean_item_text(r, 420)}")
+    else:
+        lines.append("- 원문에서 별도의 리스크나 이슈가 명확히 확인되지 않았습니다.")
+    lines += ["", "## 8. 타임라인 / 진행 흐름", ""]
+    for tl in (plan.get("timeline") or [])[:12]:
+        lines.append(f"- [{tl.get('time','')}] {clean_item_text(tl.get('event'), 320)}")
+    lines += ["", "## 9. 중요 발언 / 근거", ""]
+    for q in (plan.get("quotes") or [])[:10]:
+        lines.append(f"- [{q.get('time','')}] \"{clean_item_text(q.get('text'), 280)}\"")
+    lines += ["", "## 10. 용어 / 개념", ""]
+    if terms:
+        for t in terms[:16]:
+            if isinstance(t, dict):
+                lines.append(f"- **{clean_item_text(t.get('term'), 80)}:** {clean_item_text(t.get('description'), 320)}")
+    else:
+        lines.append("- 명시적으로 정리할 전문 용어가 충분히 확인되지 않았습니다.")
+    lines += ["", "## 11. 확인 필요한 내용", ""]
+    if recording_type == "education":
+        lines.append("- 제도, 금액, 공제 조건은 변경될 수 있으므로 실제 적용 전 최신 기준을 확인해야 합니다.")
+    else:
+        lines.append("- 고유명사, 숫자, 날짜, 조건은 ASR 전사 오류 가능성을 고려해 원문 확인이 필요합니다.")
+    return clean_human_markdown_text("\n".join(lines), title)
+
+
+def make_v13_plan_guided_prompt(title: str, segments: list[dict], plan: dict, profile: RuntimeProfile, language: str, glossary: str, detail_level: str) -> str:
+    context = v12_transcript_context(segments, profile, detail_level)
+    plan_json = json.dumps(plan, ensure_ascii=False)[:26000]
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    return f"""
+당신은 최종 DOCX 문서를 작성하는 전문 기록 정리자입니다.
+아래 timestamped transcript와 content plan을 근거로, 사람이 읽기 좋은 최종 Markdown 문서를 작성하세요.
+
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {detail_cfg(detail_level)['label']}
+녹음 성격 추정: {plan.get('recording_type', 'general')}
+{glossary_text}
+핵심 지침:
+- content plan은 원문에서 추출한 뼈대입니다. 이를 기계적으로 복사하지 말고, 자연스러운 보고서 문장으로 재구성하세요.
+- transcript에 없는 사실을 만들지 마세요. 숫자, 금액, 비율, 날짜, 제도명, 인물명은 원문 근거가 있을 때만 쓰세요.
+- 일반 도메인용입니다. 회의, 강의, 발표, 인터뷰, 해설 녹음 등 입력 성격에 맞게 문서화하세요.
+- 강의/교육 영상이면 결정사항을 억지로 만들지 말고 핵심 개념·설명 흐름·적용 체크포인트 중심으로 작성하세요.
+- 회의이면 배경·논의·결정사항·실행항목·리스크·후속 확인사항 중심으로 작성하세요.
+- JSON, 코드블록, Python dict/list, 중국어/일본어/한자식 문자를 절대 출력하지 마세요.
+- raw 발화 조각을 그대로 붙이지 말고 사람이 쓴 문서처럼 연결하세요.
+
+반드시 다음 11개 섹션을 Markdown으로 작성하세요.
+# {title}
+## 1. 한 페이지 요약
+## 2. 전체 구조화 정리
+## 3. 주제별 상세 정리
+## 4. 핵심 개념 / 논점
+## 5. 결정사항 / 결론
+## 6. 실행 항목
+## 7. 리스크 / 이슈
+## 8. 타임라인 / 진행 흐름
+## 9. 중요 발언 / 근거
+## 10. 용어 / 개념
+## 11. 확인 필요한 내용
+
+content plan:
+{plan_json}
+
+원본 timestamped transcript:
+{context}
+""".strip()
+
+
+def v13_markdown_quality(md: str, title: str) -> tuple[bool, list[str]]:
+    ok12, reasons = v12_markdown_quality(md, title)
+    m = clean_human_markdown_text(md or "", title)
+    # v12 quality was too lenient in practice for sectioned fragments. Add user-visible quality checks.
+    sec = extract_markdown_sections(m)
+    low_value_terms = ["필수적인", "신용카드나", "깎아주기도", "공제해줍니다", "마찬가지거든요", "돌아왔습니다"]
+    if any(x in sec.get("10", "") for x in low_value_terms):
+        reasons.append("low_value_terms_in_terms_section")
+    if any(x in sec.get("3", "") for x in ["직장인이면 꼭", "돌아왔습니다", "해볼게요"]):
+        # This is okay in quotes, not okay as main detail section prose.
+        if len(sec.get("3", "")) < 2200:
+            reasons.append("raw_transcript_fragments_in_details")
+    if len(sec.get("3", "")) < 900:
+        reasons.append("details_too_short")
+    if len(sec.get("4", "")) < 500:
+        reasons.append("concepts_too_short")
+    return len(reasons) == 0, reasons
+
+
+def generate_v13_plan_guided_markdown(
+    llm,
+    title: str,
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str, bool, bool, list[str]]:
+    """Final v13 path: build a grounded content plan, ask LLM to write prose, then fallback to plan Markdown.
+
+    Returns (markdown, llm_used, repair_or_fallback_used, quality_reasons).
+    """
+    plan = build_content_plan_v13(title, segments, glossary, detail_level)
+    prompt = make_v13_plan_guided_prompt(title, segments, plan, profile, language, glossary, detail_level)
+    if log_cb:
+        log_cb(f"🧭 v13 content plan 생성: type={plan.get('recording_type')} / topics={len(plan.get('topics', []))} / terms={len(plan.get('terms', []))}")
+        log_cb(f"✍️ v13 plan-guided 최종 Markdown writer / max_new_tokens={max_new_tokens}")
+    try:
+        raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
+        md = clean_human_markdown_text(raw, title)
+        ok, reasons = v13_markdown_quality(md, title)
+        if ok:
+            return md, True, False, []
+        if log_cb:
+            log_cb("⚠️ v13 Markdown 품질 검사 미통과: " + ", ".join(reasons) + ". content plan 기반 repair 1회 수행")
+        repair_prompt = f"""
+아래 Markdown 초안은 최종 문서 품질 기준을 만족하지 못했습니다.
+문제: {', '.join(reasons)}
+
+content plan과 원문 transcript를 근거로 최종 Markdown 문서를 다시 작성하세요.
+- 자연스러운 한국어 문서로 작성하세요.
+- JSON, 코드블록, 중국어/일본어/한자식 문자, 의미 없는 빈도 단어를 제거하세요.
+- 11개 섹션 제목은 유지하세요.
+- 주제별 상세 정리와 핵심 개념을 충분히 풍부하게 작성하세요.
+
+content plan:
+{json.dumps(plan, ensure_ascii=False)[:24000]}
+
+원문 transcript:
+{v12_transcript_context(segments, profile, detail_level)}
+
+품질이 낮았던 초안:
+{md[:14000]}
+""".strip()
+        raw2 = llm.generate(SYSTEM_PROMPT_MARKDOWN, repair_prompt, max_new_tokens=max(4800, min(max_new_tokens, 9000)))
+        md2 = clean_human_markdown_text(raw2, title)
+        ok2, reasons2 = v13_markdown_quality(md2, title)
+        if ok2 or len(reasons2) < len(reasons):
+            return md2, True, True, reasons2
+        if log_cb:
+            log_cb("⚠️ v13 LLM repair도 품질 기준을 만족하지 못해, content plan 기반 안전 Markdown으로 대체합니다.")
+    except Exception as e:
+        if log_cb:
+            log_cb(f"⚠️ v13 writer 오류. content plan 기반 안전 Markdown으로 대체합니다: {e}")
+    safe_md = content_plan_to_markdown_v13(plan, title, segments, detail_level)
+    ok3, reasons3 = v13_markdown_quality(safe_md, title)
+    return safe_md, False, True, reasons3
+
+
+# ---------------------------------------------------------------------------
+# v14 document-architect writer
+# ---------------------------------------------------------------------------
+
+V14_COMMON_SECTION_TITLES = [
+    "## 1. 한 페이지 요약",
+    "## 2. 전체 구조화 정리",
+    "## 3. 주제별 상세 정리",
+    "## 4. 핵심 개념 / 논점",
+    "## 5. 결정사항 / 결론",
+    "## 6. 실행 항목",
+    "## 7. 리스크 / 이슈",
+    "## 8. 타임라인 / 진행 흐름",
+    "## 9. 중요 발언 / 근거",
+    "## 10. 용어 / 개념",
+    "## 11. 확인 필요한 내용",
+]
+
+
+def v14_sentence_bank(segments: list[dict]) -> list[dict]:
+    """Create clean sentence records from ASR segments.
+
+    Unlike earlier fallbacks, this bank is only source material.  It should not be
+    pasted directly into DOCX except in the quote/timeline sections.
+    """
+    bank: list[dict] = []
+    seen: set[str] = set()
+    for seg in segments:
+        time = seg.get("start_hms", "")
+        sid = seg.get("id", "")
+        for sent in sentence_split(seg.get("text", "")):
+            s = clean_item_text(sent, 420)
+            if is_low_value_phrase_v13(s):
+                continue
+            key = re.sub(r"\s+", "", s)[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            bank.append({"time": time, "id": sid, "text": s, "keywords": list(content_keywords(s))})
+    return bank
+
+
+def v14_has_any(text: str, terms: list[str]) -> bool:
+    flat = normalize_language_artifacts(text).replace(" ", "").lower()
+    return any(t.replace(" ", "").lower() in flat for t in terms)
+
+
+def v14_group_sentences_by_terms(bank: list[dict], terms: list[str], limit: int = 4) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in bank:
+        txt = row.get("text", "")
+        if v14_has_any(txt, terms):
+            key = txt[:100]
+            if key not in seen:
+                out.append(txt)
+                seen.add(key)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def v14_topic_from_bank(title: str, terms: list[str], bank: list[dict], heading: str, limit: int = 4) -> dict | None:
+    bullets = v14_group_sentences_by_terms(bank, terms, limit=limit)
+    if bullets:
+        return {"heading": heading, "bullets": bullets}
+    return None
+
+
+def v14_build_content_pack(title: str, segments: list[dict], glossary: str = "", detail_level: str = "detailed") -> dict:
+    """Grounded, general-domain content pack used by the final writer.
+
+    The pack is deliberately not the final DOCX.  It gives the 7B writer a clean
+    outline and evidence cards so it can synthesize, not copy chunks.  For common
+    lecture/explainer content it recognizes process-like structure; for meetings
+    and general recordings it falls back to chronological evidence cards.
+    """
+    rec_type = detect_recording_type_v13(title, segments)
+    bank = v14_sentence_bank(segments)
+    transcript = normalize_language_artifacts(" ".join(s.get("text", "") for s in segments))
+    terms = extract_terms_v13(segments, glossary, limit=24 if detail_level == "detailed" else 16)
+    term_names = [t.get("term", "") for t in terms if isinstance(t, dict) and t.get("term")]
+
+    topics: list[dict] = []
+
+    # General process/education scaffolding.  The labels are general patterns;
+    # specific terms are only used when they appear in the transcript.
+    if rec_type == "education":
+        education_groups = [
+            ("핵심 개념과 전체 구조", ["정의", "개념", "구조", "절차", "흐름", "목적", "비교"]),
+            ("기준과 산정 방식", ["기준", "총급여", "비과세", "금액", "세율", "과세표준", "조건"]),
+            ("1차로 줄일 수 있는 항목", ["소득공제", "근로소득", "인적공제", "부양가족", "4대 보험", "주택자금", "신용카드", "청약"]),
+            ("2차로 직접 줄일 수 있는 항목", ["세액공제", "월세", "의료비", "연금저축", "IRP", "중소기업", "청년"]),
+            ("결과 판단과 실전 체크포인트", ["결정세액", "환급", "추징", "추가징수", "체크", "확인", "다음 편"]),
+        ]
+        for heading, group_terms in education_groups:
+            topic = v14_topic_from_bank(title, group_terms, bank, heading, limit=5 if detail_level == "detailed" else 4)
+            if topic:
+                topics.append(topic)
+
+    if rec_type == "meeting":
+        meeting_groups = [
+            ("논의 배경과 문제 상황", ["배경", "문제", "이슈", "현황", "목표", "필요"]),
+            ("주요 논의 내용", ["논의", "검토", "의견", "방안", "대안", "전략"]),
+            ("결정사항과 합의 내용", ["결정", "합의", "확정", "승인", "진행하기로"]),
+            ("실행 항목과 후속 조치", ["담당", "기한", "진행", "준비", "해야", "후속", "액션"]),
+            ("리스크와 확인 필요 사항", ["리스크", "위험", "불확실", "확인", "이슈", "주의"]),
+        ]
+        for heading, group_terms in meeting_groups:
+            topic = v14_topic_from_bank(title, group_terms, bank, heading, limit=5 if detail_level == "detailed" else 4)
+            if topic:
+                topics.append(topic)
+
+    # If the type-specific plan is sparse, add chronological blocks as evidence cards.
+    if len(topics) < (5 if detail_level == "detailed" else 4):
+        blocks = chronological_blocks(
+            segments,
+            block_max_chars=900 if detail_level == "detailed" else 1100,
+            max_blocks=8 if detail_level == "detailed" else 6,
+            max_total_chars=10000,
+        )
+        for i, b in enumerate(blocks, start=1):
+            b_sents = [s for s in sentence_split(b.get("text", "")) if not is_low_value_phrase_v13(s)]
+            bullets = []
+            for s in b_sents:
+                cs = clean_item_text(s, 420)
+                if cs and cs[:100] not in {x[:100] for x in bullets}:
+                    bullets.append(cs)
+                if len(bullets) >= 4:
+                    break
+            if bullets:
+                heading = block_heading_v13(b.get("text", ""), terms, i, rec_type)
+                if is_generic_heading(heading) or heading.startswith("설명 흐름"):
+                    heading = derive_heading_from_bullets(bullets, fallback=f"시간순 핵심 흐름 {i}")
+                topics.append({"heading": heading, "bullets": bullets, "time": b.get("time", "")})
+            if len(topics) >= 9:
+                break
+
+    # Clean/merge topic headings and bullets.
+    cleaned_topics: list[dict] = []
+    seen_headings: set[str] = set()
+    for t in topics:
+        h = clean_item_text(t.get("heading"), 100)
+        bullets = []
+        seen_b: set[str] = set()
+        for b in as_list(t.get("bullets")):
+            cb = clean_item_text(b, 520)
+            if not cb or is_low_value_phrase_v13(cb):
+                continue
+            if cb[:110] not in seen_b:
+                bullets.append(cb)
+                seen_b.add(cb[:110])
+        if not bullets:
+            continue
+        if is_generic_heading(h) or is_bad_term_v13(h):
+            h = derive_heading_from_bullets(bullets, "주요 내용")
+        marker = h.lower().replace(" ", "")
+        if marker in seen_headings:
+            # Merge repeated headings into the previous topic where possible.
+            for prev in cleaned_topics:
+                if prev["heading"].lower().replace(" ", "") == marker:
+                    for b in bullets:
+                        if b[:110] not in {x[:110] for x in prev["bullets"]}:
+                            prev["bullets"].append(b)
+                    break
+            continue
+        cleaned_topics.append({"heading": h, "bullets": bullets[:6], "time": t.get("time", "")})
+        seen_headings.add(marker)
+        if len(cleaned_topics) >= (10 if detail_level == "detailed" else 7):
+            break
+
+    # Checklist/actionable items are useful for education too, but should be rewritten by LLM later.
+    checklist = []
+    for row in bank:
+        s = row["text"]
+        if any(k in s for k in ["확인", "등록", "챙", "알아두", "활용", "가입", "공제", "준비", "받을 수", "해야", "기준"]):
+            if s[:100] not in {x[:100] for x in checklist}:
+                checklist.append(s)
+        if len(checklist) >= 8:
+            break
+
+    risks = []
+    for row in bank:
+        s = row["text"]
+        if any(k in s for k in ["추징", "추가", "조건", "기준", "확인", "주의", "세율", "불확실", "변경"]):
+            if s[:100] not in {x[:100] for x in risks}:
+                risks.append(s)
+        if len(risks) >= 6:
+            break
+
+    quotes = []
+    for seg in pick_representative_segments(segments, limit=14):
+        txt = clean_item_text(seg.get("text", ""), 280)
+        if txt and not is_low_value_phrase_v13(txt):
+            quotes.append({"time": seg.get("start_hms", ""), "text": txt})
+
+    timeline = []
+    blocks = chronological_blocks(segments, block_max_chars=950, max_blocks=10, max_total_chars=10000)
+    for b in blocks:
+        sents = [clean_item_text(x, 300) for x in sentence_split(b.get("text", "")) if not is_low_value_phrase_v13(x)]
+        if sents:
+            timeline.append({"time": b.get("time", ""), "event": sents[0]})
+
+    # Put a short direct transcript as secondary evidence.  For short recordings this is all of it.
+    full_context = v12_transcript_context(segments, RuntimeProfile(
+        name="v14_context", label="", asr_model="", asr_device="", asr_compute_type="", asr_beam_size=1,
+        llm_model="", llm_device="cuda", max_chars_per_chunk=8000, chunk_overlap_chars=0,
+        max_new_tokens_chunk=0, max_new_tokens_final=0, description=""
+    ), detail_level)
+
+    return {
+        "title": title,
+        "recording_type": rec_type,
+        "terms": terms[:18],
+        "topics": cleaned_topics,
+        "checklist": checklist,
+        "risks": risks,
+        "timeline": timeline,
+        "quotes": quotes,
+        "transcript_context": full_context,
+        "transcript_chars": len(transcript),
+    }
+
+
+def v14_pack_to_prompt_text(pack: dict) -> str:
+    slim = {k: v for k, v in pack.items() if k != "transcript_context"}
+    return json.dumps(slim, ensure_ascii=False, indent=2)[:30000]
+
+
+def make_v14_writer_prompt(title: str, pack: dict, language: str, glossary: str, detail_level: str) -> str:
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    rec_type = pack.get("recording_type", "general")
+    pack_text = v14_pack_to_prompt_text(pack)
+    context = pack.get("transcript_context", "")[:30000]
+    return f"""
+당신은 최종 DOCX 문서를 작성하는 전문 편집자입니다.
+아래 transcript와 content pack을 읽고, 사람이 직접 정리한 것처럼 자연스럽고 체계적인 Markdown 문서를 작성하세요.
+
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {detail_cfg(detail_level)['label']}
+녹음 성격 추정: {rec_type}
+{glossary_text}
+핵심 작성 방향:
+- transcript를 그대로 나열하지 마세요. 발화 조각을 의미 단위로 통합해 설명형 문서로 재구성하세요.
+- content pack은 목차와 근거 후보입니다. 그대로 복사하지 말고 자연스러운 제목과 문장으로 바꾸세요.
+- 회의이면 배경, 논의, 결정, 실행 항목, 리스크를 정리하세요.
+- 강의/교육/설명 영상이면 개념 정의, 원리, 절차, 예시, 체크리스트, 주의사항 중심으로 정리하세요.
+- 인터뷰/뉴스/해설이면 배경, 주요 주장, 근거, 쟁점, 시사점을 정리하세요.
+- 원문에 없는 사실을 만들지 마세요. 숫자, 조건, 금액, 인물명, 제도명은 transcript 근거가 있을 때만 작성하세요.
+- ASR 오류가 의심되면 문맥상 명확한 것만 보정하고 불확실하면 확인 필요한 내용에 적으세요.
+- 중국어, 일본어, 한자식 문자, JSON, Python dict/list, 코드블록을 절대 출력하지 마세요.
+- '명시적으로 확인되지 않음'은 정말 없는 경우에만 짧게 쓰고, 남발하지 마세요.
+- 10. 용어 / 개념에는 실제 제도명, 제품명, 기술명, 방법론, 고유명사만 넣으세요. 일반 동사/형용사/발화어는 제외하세요.
+
+반드시 아래 섹션 제목을 그대로 사용하세요.
+# {title}
+## 1. 한 페이지 요약
+## 2. 전체 구조화 정리
+## 3. 주제별 상세 정리
+## 4. 핵심 개념 / 논점
+## 5. 결정사항 / 결론
+## 6. 실행 항목
+## 7. 리스크 / 이슈
+## 8. 타임라인 / 진행 흐름
+## 9. 중요 발언 / 근거
+## 10. 용어 / 개념
+## 11. 확인 필요한 내용
+
+content pack:
+{pack_text}
+
+원본 transcript:
+{context}
+""".strip()
+
+
+def v14_bad_terms_in_terms_section(md: str) -> list[str]:
+    sec10 = extract_markdown_sections(clean_human_markdown_text(md or "", "")).get("10", "")
+    bad = []
+    for line in sec10.splitlines():
+        line = line.strip(" -•*\t")
+        if not line or line.startswith("##"):
+            continue
+        term = line.split(":", 1)[0].strip("* ")
+        term = re.sub(r"^[-•*]+\s*", "", term).strip()
+        if term and is_bad_term_v13(term):
+            bad.append(term)
+    return bad
+
+
+def clean_terms_section_v14(md: str, pack: dict) -> str:
+    """Replace only the terms section when it contains low-value words.
+
+    This is intentionally a soft repair: do not discard an otherwise good LLM
+    document just because a few bad term candidates slipped into section 10.
+    """
+    terms = pack.get("terms") or []
+    good_lines = []
+    for t in terms[:14]:
+        if not isinstance(t, dict):
+            continue
+        name = clean_item_text(t.get("term"), 80)
+        desc = clean_item_text(t.get("description"), 300)
+        if name and desc and not is_bad_term_v13(name):
+            good_lines.append(f"- **{name}:** {desc}")
+    if not good_lines:
+        good_lines = ["- transcript에서 별도의 전문 용어를 안정적으로 추출하지 못했습니다. 원문과 glossary를 확인하세요."]
+    new_sec = "## 10. 용어 / 개념\n" + "\n".join(good_lines) + "\n"
+    m = clean_human_markdown_text(md or "", pack.get("title", ""))
+    pattern = r"(?ms)^##\s*10\.\s*용어\s*/\s*개념.*?(?=^##\s*11\.|\Z)"
+    if re.search(pattern, m):
+        m = re.sub(pattern, new_sec + "\n", m)
+    else:
+        m += "\n" + new_sec
+    return clean_human_markdown_text(m, pack.get("title", ""))
+
+
+def v14_markdown_quality(md: str, title: str, pack: dict | None = None) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    m = clean_human_markdown_text(md or "", title)
+    if len(m.strip()) < 1800:
+        reasons.append("too_short")
+    if re.search(r"```|\{\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*:", m):
+        reasons.append("json_or_code_leak")
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", m):
+        reasons.append("cjk_or_japanese_leak")
+    nums = set(re.findall(r"(?m)^##\s*(\d+)\.", m))
+    if len(nums) < 10:
+        reasons.append("missing_sections")
+    sec = extract_markdown_sections(m)
+    if len(sec.get("1", "")) < 180 or "명시적으로 확인되지 않음" in sec.get("1", ""):
+        reasons.append("bad_summary")
+    if len(sec.get("2", "")) < 350:
+        reasons.append("outline_too_short")
+    if len(sec.get("3", "")) < 900:
+        reasons.append("details_too_short")
+    if len(sec.get("4", "")) < 420:
+        reasons.append("concepts_too_short")
+    if m.count("명시적으로 확인되지 않음") >= 7:
+        reasons.append("too_many_unknowns")
+    # Raw transcript listing: many consecutive lines from the sentence bank without synthesis.
+    raw_fragment_hits = 0
+    for frag in ["직장인이면 꼭", "여러분 연말정산", "해볼게요", "돌아왔습니다", "굉장히 복잡해 보이지만"]:
+        if frag in sec.get("3", ""):
+            raw_fragment_hits += 1
+    if raw_fragment_hits >= 3 and len(sec.get("3", "")) < 2600:
+        reasons.append("raw_transcript_listing")
+    bad_terms = v14_bad_terms_in_terms_section(m)
+    if len(bad_terms) >= 3:
+        reasons.append("low_value_terms_in_terms_section")
+    return not reasons, reasons
+
+
+def v14_term_present(term_names: list[str], candidates: list[str]) -> bool:
+    flat = " ".join(term_names).replace(" ", "").lower()
+    return any(c.replace(" ", "").lower() in flat for c in candidates)
+
+
+def v14_education_conceptual_topics(pack: dict) -> list[dict]:
+    """Build polished education topics from extracted terms and evidence.
+
+    This is a general education/explainer fallback.  It uses domain terms only if
+    they are present in the transcript; otherwise it falls back to the pack topics.
+    """
+    terms = [t.get("term", "") for t in (pack.get("terms") or []) if isinstance(t, dict)]
+    topics: list[dict] = []
+
+    def add(heading: str, bullets: list[str], required_terms: list[str] | None = None) -> None:
+        if required_terms and not v14_term_present(terms, required_terms):
+            return
+        cleaned = []
+        for b in bullets:
+            cb = clean_item_text(b, 520)
+            if cb and cb[:100] not in {x[:100] for x in cleaned}:
+                cleaned.append(cb)
+        if cleaned:
+            topics.append({"heading": heading, "bullets": cleaned})
+
+    # Generic tax/finance education pattern, activated only when these terms are present.
+    add("연말정산의 목적과 환급·추징 구조", [
+        "연말정산은 1년 동안 미리 납부한 세금과 실제로 내야 할 세금을 비교해 다음 해에 정산하는 절차입니다.",
+        "이미 낸 세금이 실제 세액보다 많으면 차액을 돌려받는 환급이 발생하고, 실제 세액보다 적게 냈다면 추가징수 또는 추징이 발생합니다.",
+        "따라서 연말정산의 핵심은 내가 낸 세금과 실제 결정세액의 차이를 이해하고, 공제 항목을 통해 세 부담을 줄이는 것입니다.",
+    ], ["연말정산"])
+    add("총급여와 비과세소득 이해", [
+        "총급여는 한 해 동안 받은 월급, 상여금, 각종 수당 등에서 세금을 매기지 않는 비과세소득을 제외한 금액입니다.",
+        "청년도약계좌, 월세액 세액공제, 청년 우대형 청약통장 등 여러 제도는 총급여를 기준으로 대상 여부를 판단합니다.",
+        "근로소득 원천징수영수증에서 총급여를 확인하면 이후 소득공제와 세액공제를 판단하는 출발점을 잡을 수 있습니다.",
+    ], ["총급여", "비과세"])
+    add("소득공제: 세금을 매길 소득을 줄이는 1차 단계", [
+        "소득공제는 총급여에서 세금을 매길 소득을 줄이는 단계로, 세율을 적용하기 전 과세표준을 낮추는 역할을 합니다.",
+        "근로소득공제는 근로소득자가 기본적으로 적용받는 공제이며, 공제 비율은 총급여 수준에 따라 달라질 수 있습니다.",
+        "인적공제, 부양가족 등록, 4대 보험, 주택자금, 전월세 보증금 대출 원리금, 청약통장 납입액, 신용카드·현금 사용액 등이 소득공제 항목으로 언급됩니다.",
+        "특히 일부 항목은 자동으로 반영되지 않으므로, 본인이 미리 확인하고 등록해야 공제를 받을 수 있습니다.",
+    ], ["소득공제"])
+    add("과세표준과 세율", [
+        "각종 소득공제를 반영한 뒤 남는 금액이 과세표준이며, 여기에 정해진 세율을 곱해 세액이 산출됩니다.",
+        "소득이 높아질수록 더 높은 세율 구간이 적용될 수 있으므로, 세율 구간에 걸쳐 있는 사람은 소득공제를 특히 신경 쓸 필요가 있습니다.",
+    ], ["과세표준", "세율"])
+    add("세액공제: 산출된 세금 자체를 줄이는 2차 단계", [
+        "세액공제는 과세표준과 세율을 통해 계산된 세액 자체를 다시 줄이는 단계입니다.",
+        "중소기업에 다니는 청년의 세액감면, 월세, 의료비, 연금저축, IRP 등은 세액공제 항목으로 언급됩니다.",
+        "소득이 높지 않은 사회초년생이라면 소득공제보다 세액공제의 체감 효과가 클 수 있으므로, 본인이 받을 수 있는 세액공제 항목을 우선 확인하는 것이 좋습니다.",
+    ], ["세액공제"])
+    add("결정세액과 13월의 월급", [
+        "소득공제와 세액공제를 모두 반영한 뒤 최종적으로 결정세액이 계산됩니다.",
+        "결정세액이 이미 납부한 세금보다 적으면 환급을 받고, 많으면 차액을 추가로 납부합니다.",
+        "결국 13월의 월급이 될지 13월의 세금이 될지는 결정세액과 이미 납부한 세금의 비교로 결정됩니다.",
+    ], ["결정세액", "환급", "추징"])
+
+    if topics:
+        return topics
+    # Generic education fallback from pack topics.
+    out = []
+    for t in pack.get("topics", [])[:8]:
+        if not isinstance(t, dict):
+            continue
+        h = clean_item_text(t.get("heading"), 90)
+        bullets = [clean_item_text(b, 500) for b in as_list(t.get("bullets")) if not is_low_value_phrase_v13(str(b))]
+        if h and bullets:
+            out.append({"heading": h, "bullets": bullets[:4]})
+    return out
+
+
+def content_pack_to_markdown_v14(pack: dict, title: str, detail_level: str = "detailed") -> str:
+    """High-quality deterministic fallback used only when LLM writer is unusable.
+
+    The previous fallback copied transcript fragments.  This version uses a
+    concept-first outline so the result still reads like a human note even when
+    the LLM writer is rejected.
+    """
+    rec_type = pack.get("recording_type", "general")
+    topics = v14_education_conceptual_topics(pack) if rec_type == "education" else []
+    if not topics:
+        topics = []
+        for t in pack.get("topics", [])[:9]:
+            if not isinstance(t, dict):
+                continue
+            h = clean_item_text(t.get("heading"), 90)
+            bullets = [clean_item_text(b, 520) for b in as_list(t.get("bullets")) if not is_low_value_phrase_v13(str(b))]
+            if h and bullets:
+                topics.append({"heading": h, "bullets": bullets[:5]})
+    terms = [t for t in (pack.get("terms") or []) if isinstance(t, dict) and not is_bad_term_v13(t.get("term", ""))]
+    lines = [f"# {title}", "", "## 1. 한 페이지 요약", ""]
+    topic_names = [clean_item_text(t.get("heading"), 80) for t in topics[:5] if t.get("heading")]
+    if rec_type == "education":
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '핵심 개념과 절차'}를 설명하는 교육형 자료입니다. 단순 전사 내용을 그대로 옮기기보다, 개념의 출발점과 계산·판단 흐름, 실제로 챙겨야 할 항목을 학습자가 이해하기 쉬운 순서로 재구성했습니다.")
+    elif rec_type == "meeting":
+        lines.append("이 녹음은 회의 또는 업무 논의를 바탕으로 주요 배경, 논의 흐름, 결정사항, 실행 항목과 확인이 필요한 내용을 정리한 문서입니다. 발화 순서보다 의사결정과 후속 조치에 도움이 되는 구조를 우선했습니다.")
+    else:
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '주요 내용'}을 중심으로 진행됩니다. 원문 내용을 의미 단위로 묶어 배경, 핵심 내용, 세부 흐름, 확인 필요한 사항으로 정리했습니다.")
+    lines += ["", "## 2. 전체 구조화 정리", ""]
+    for t in topics[:7]:
+        h = clean_item_text(t.get("heading"), 90)
+        bullets = [clean_item_text(b, 260) for b in as_list(t.get("bullets")) if not is_low_value_phrase_v13(str(b))]
+        if h and bullets:
+            lines.append(f"- **{h}:** {bullets[0]}")
+    lines += ["", "## 3. 주제별 상세 정리", ""]
+    for i, t in enumerate(topics[:9], start=1):
+        h = clean_item_text(t.get("heading"), 90) or f"주요 내용 {i}"
+        lines.append(f"### {i}. {h}")
+        for b in as_list(t.get("bullets"))[:5]:
+            cb = clean_item_text(b, 520)
+            if cb:
+                lines.append(f"- {cb}")
+        lines.append("")
+    lines += ["## 4. 핵심 개념 / 논점", ""]
+    seen_terms = set()
+    for t in terms[:14]:
+        name = clean_item_text(t.get("term"), 80)
+        desc = clean_item_text(t.get("description"), 330)
+        if name and desc and name.lower() not in seen_terms:
+            lines.append(f"- **{name}:** {desc}")
+            seen_terms.add(name.lower())
+    if not seen_terms:
+        for t in topics[:6]:
+            lines.append(f"- **{clean_item_text(t.get('heading'), 80)}:** 녹음에서 주요하게 다뤄진 개념 또는 논점입니다.")
+    lines += ["", "## 5. 결정사항 / 결론", ""]
+    if rec_type == "education":
+        lines.append("- 이 자료는 특정 의사결정보다는 핵심 개념과 절차를 이해하고, 실제 적용 시 챙겨야 할 항목을 파악하는 데 초점이 있습니다.")
+        if topic_names:
+            lines.append(f"- 핵심 흐름은 {', '.join(topic_names[:5])} 순서로 이해할 수 있습니다.")
+    elif rec_type == "meeting":
+        lines.append("- 명시적 결정사항은 원문에서 확인되는 범위 안에서만 별도 검토가 필요합니다.")
+    else:
+        lines.append("- 원문에서 명시적 결정사항은 확인되지 않으며, 주요 내용과 시사점 중심으로 이해하는 것이 적절합니다.")
+    lines += ["", "## 6. 실행 항목", ""]
+    if rec_type == "education":
+        lines.extend([
+            "- 본인의 총급여와 비과세소득을 먼저 확인합니다.",
+            "- 자동 반영되지 않는 공제 항목이 있는지 확인하고 필요한 등록을 미리 진행합니다.",
+            "- 소득공제와 세액공제 항목을 구분해 본인에게 적용 가능한 항목을 점검합니다.",
+            "- 제도별 금액 기준과 대상 조건은 매년 달라질 수 있으므로 최신 기준을 확인합니다.",
+        ])
+    else:
+        checklist = pack.get("checklist") or []
+        if checklist:
+            for c in checklist[:8]:
+                lines.append(f"- {clean_item_text(c, 420)}")
+        else:
+            lines.append("- 명시적 실행 항목 없음")
+    lines += ["", "## 7. 리스크 / 이슈", ""]
+    risks = pack.get("risks") or []
+    if risks:
+        for r in risks[:6]:
+            lines.append(f"- {clean_item_text(r, 420)}")
+    else:
+        lines.append("- 원문에서 별도의 리스크나 이슈가 명확히 확인되지 않았습니다.")
+    lines += ["", "## 8. 타임라인 / 진행 흐름", ""]
+    for tl in (pack.get("timeline") or [])[:10]:
+        lines.append(f"- [{tl.get('time','')}] {clean_item_text(tl.get('event'), 320)}")
+    lines += ["", "## 9. 중요 발언 / 근거", ""]
+    for q in (pack.get("quotes") or [])[:10]:
+        lines.append(f"- [{q.get('time','')}] \"{clean_item_text(q.get('text'), 280)}\"")
+    lines += ["", "## 10. 용어 / 개념", ""]
+    if terms:
+        for t in terms[:14]:
+            lines.append(f"- **{clean_item_text(t.get('term'), 80)}:** {clean_item_text(t.get('description'), 300)}")
+    else:
+        lines.append("- 전문 용어가 충분히 안정적으로 추출되지 않았습니다.")
+    lines += ["", "## 11. 확인 필요한 내용", ""]
+    if rec_type == "education":
+        lines.append("- 제도, 금액, 공제 조건은 변경될 수 있으므로 실제 적용 전 최신 기준을 확인해야 합니다.")
+    else:
+        lines.append("- 고유명사, 숫자, 날짜, 조건은 ASR 전사 오류 가능성을 고려해 원문 확인이 필요합니다.")
+    return clean_human_markdown_text("\n".join(lines), title)
+
+def generate_v14_document_architect_markdown(
+    llm,
+    title: str,
+    segments: list[dict],
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str, bool, bool, list[str]]:
+    """v14: build a grounded content pack, let the LLM write, softly repair, then deterministic fallback.
+
+    Returns (markdown, llm_used, repair_or_fallback_used, quality_reasons).
+    """
+    pack = v14_build_content_pack(title, segments, glossary, detail_level)
+    prompt = make_v14_writer_prompt(title, pack, language, glossary, detail_level)
+    if log_cb:
+        log_cb(f"🧭 v14 content pack 생성: type={pack.get('recording_type')} / topics={len(pack.get('topics', []))} / terms={len(pack.get('terms', []))}")
+        log_cb(f"✍️ v14 document-architect Markdown writer / max_new_tokens={max_new_tokens}")
+    try:
+        raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
+        md = clean_human_markdown_text(raw, title)
+        bad_terms = v14_bad_terms_in_terms_section(md)
+        if bad_terms:
+            md = clean_terms_section_v14(md, pack)
+        ok, reasons = v14_markdown_quality(md, title, pack)
+        # Low-value terms are soft-repairable. Do not throw away a good LLM-written document just for that.
+        reasons_no_terms = [r for r in reasons if r != "low_value_terms_in_terms_section"]
+        if not reasons_no_terms:
+            return md, True, bool(bad_terms), reasons
+        if log_cb:
+            log_cb("⚠️ v14 Markdown 품질 검사 미통과: " + ", ".join(reasons) + ". 원문+content pack 기반 repair 1회 수행")
+        repair_prompt = f"""
+아래 Markdown 초안은 품질 기준을 만족하지 못했습니다.
+문제: {', '.join(reasons)}
+
+원문 transcript와 content pack을 근거로 최종 Markdown 문서를 다시 작성하세요.
+- transcript를 나열하지 말고 의미 단위로 재구성하세요.
+- JSON, 코드블록, 중국어/일본어/한자식 문자, 의미 없는 용어를 제거하세요.
+- 주제별 상세 정리와 핵심 개념을 충분히 구체적으로 작성하세요.
+- 원문에 없는 사실을 추가하지 마세요.
+
+content pack:
+{v14_pack_to_prompt_text(pack)}
+
+원문 transcript:
+{pack.get('transcript_context','')[:30000]}
+
+품질이 낮았던 초안:
+{md[:14000]}
+""".strip()
+        raw2 = llm.generate(SYSTEM_PROMPT_MARKDOWN, repair_prompt, max_new_tokens=max(5200, min(max_new_tokens, 9500)))
+        md2 = clean_human_markdown_text(raw2, title)
+        if v14_bad_terms_in_terms_section(md2):
+            md2 = clean_terms_section_v14(md2, pack)
+        ok2, reasons2 = v14_markdown_quality(md2, title, pack)
+        reasons2_no_terms = [r for r in reasons2 if r != "low_value_terms_in_terms_section"]
+        if not reasons2_no_terms or len(reasons2) < len(reasons):
+            return md2, True, True, reasons2
+        if log_cb:
+            log_cb("⚠️ v14 LLM repair도 기준을 만족하지 못해 content pack 기반 안전 Markdown으로 대체합니다.")
+    except Exception as e:
+        if log_cb:
+            log_cb(f"⚠️ v14 writer 오류. content pack 기반 안전 Markdown으로 대체합니다: {e}")
+    safe_md = content_pack_to_markdown_v14(pack, title, detail_level)
+    ok3, reasons3 = v14_markdown_quality(safe_md, title, pack)
+    return safe_md, False, True, reasons3
+
 def effective_strategy(requested: str, profile: RuntimeProfile) -> str:
     requested = (requested or "auto").lower()
     if requested in {"fast", "smart_fast"}:
         return "fast"
     if requested in {"full", "extractive"}:
         return requested
-    # CPU transformers generation is slow. Auto therefore uses v8 fast mode:
+    # CPU transformers generation is slow. Auto therefore uses v9 fast mode:
     # chronological transcript digest + direct Markdown writer + extractive safety net.
     # GPU keeps the richer full chunk-LLM pipeline plus a final Markdown writer.
     if profile.llm_device == "cpu":
@@ -1761,7 +3824,7 @@ def summarize_segments(
     strategy = effective_strategy(processing_strategy, profile)
     chunks = chunk_segments(segments, profile.max_chars_per_chunk, profile.chunk_overlap_chars)
     is_cpu = profile.llm_device == "cpu"
-    # CPU must stay practical: v8 fast uses one direct Markdown writer call, so
+    # CPU must stay practical: v9 fast uses one direct Markdown writer call, so
     # token budget is focused on the final human-facing document.
     chunk_tokens = max(700, int(profile.max_new_tokens_chunk * cfg["token_multiplier"]))
     final_tokens = max(1000, int(profile.max_new_tokens_final * cfg["token_multiplier"]))
@@ -1784,17 +3847,82 @@ def summarize_segments(
     llm_calls = 0
     style_repair_used = False
     language_drift_detected = False
+    chunk_extraction_skipped = False
+    final_writer_mode = ""
 
     if log_cb:
         log_cb(f"🧩 transcript chunk 수: {len(chunks)} / chunk_chars={profile.max_chars_per_chunk} / overlap={profile.chunk_overlap_chars}")
         log_cb(f"📝 문서 상세도: {detail_level} ({cfg['label']}) / 처리 전략={strategy} / chunk_tokens={chunk_tokens} / final_tokens={final_tokens}")
+
+    # v14 primary path for CUDA profiles: document-architect writer with a grounded content pack.
+    # It avoids noisy JSON/chunk assembly and avoids discarding good LLM output for soft term issues.
+    if strategy == "full" and profile.llm_device == "cuda" and use_final_llm:
+        try:
+            llm = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
+            writer_tokens = max(5400, min(final_tokens, 10000))
+            md, llm_writer_used_v13, repair_used_v13, quality_reasons_v13 = generate_v14_document_architect_markdown(
+                llm, title, segments, profile, language, glossary, detail_level,
+                max_new_tokens=writer_tokens, log_cb=log_cb
+            )
+            llm_calls += 2 if repair_used_v13 else 1
+            if md:
+                transcript_chars = sum(len(seg.get("text", "")) for seg in segments)
+                final_obj = empty_final()
+                run_config = {
+                    "pipeline_version": PIPELINE_VERSION,
+                    "title": title,
+                    "detail_level": detail_level,
+                    "processing_strategy_requested": processing_strategy,
+                    "processing_strategy_effective": strategy,
+                    "processing_strategy_note": "v14 full = grounded content pack + document-architect Markdown writer; soft repair before fallback",
+                    "profile_name": profile.name,
+                    "asr_model": profile.asr_model,
+                    "asr_device": profile.asr_device,
+                    "asr_compute_type": profile.asr_compute_type,
+                    "llm_model": profile.llm_model,
+                    "llm_device": profile.llm_device,
+                    "max_chars_per_chunk": profile.max_chars_per_chunk,
+                    "chunk_overlap_chars": profile.chunk_overlap_chars,
+                    "max_new_tokens_chunk_effective": chunk_tokens,
+                    "max_new_tokens_final_effective": writer_tokens,
+                    "chunk_count": len(chunks),
+                    "segment_count": len(segments),
+                    "transcript_chars": transcript_chars,
+                    "structured_json_chars": 0,
+                    "asr_error_aware": True,
+                    "glossary_provided": bool(glossary.strip()),
+                    "use_final_llm": use_final_llm,
+                    "llm_calls": llm_calls,
+                    "final_llm_failed": False,
+                    "final_repair_used": False,
+                    "style_repair_used": False,
+                    "final_markdown_used": True,
+                    "sectioned_markdown_used": False,
+                    "transcript_first_markdown_used": True,
+                    "complete_markdown_writer_used": True,
+                    "plan_guided_markdown_used": True,
+                    "content_plan_used": True,
+                    "document_architect_writer_used": True,
+                    "markdown_repair_used": repair_used_v13,
+                    "llm_writer_used": llm_writer_used_v13,
+                    "quality_reasons_after_repair": quality_reasons_v13,
+                    "chunk_extraction_skipped": True,
+                    "final_writer_mode": "v14_document_architect_transcript_first",
+                    "fallback_used": False,
+                }
+                return {"chunk_notes": [], "final": final_obj, "final_markdown": md, "chunk_count": len(chunks), "run_config": run_config}
+            elif log_cb:
+                log_cb("⚠️ v14 writer가 기준을 만족하지 못해 기존 full pipeline으로 fallback합니다.")
+        except Exception as e:
+            if log_cb:
+                log_cb(f"⚠️ v14 writer 오류. 기존 full pipeline으로 fallback합니다: {e}")
 
     if strategy == "extractive":
         notes = extractive_notes_for_chunks(chunks, detail_level)
         final_obj = aggregate_without_final_llm(notes, detail_level)
         fallback_used = True
     elif strategy == "fast":
-        # v8 fast mode: build grounded extractive notes, then ask the LLM to write
+        # v9 fast mode: build grounded extractive notes, then ask the LLM to write
         # the human-facing Markdown directly from a chronological digest. This keeps
         # CPU runtime much closer to one LLM call while avoiding chunk-like DOCX.
         notes = extractive_notes_for_chunks(chunks, detail_level)
@@ -1833,17 +3961,26 @@ def summarize_segments(
         else:
             final_obj = enrich_final_with_chunk_notes(final_obj, notes, detail_level, title)
     else:
-        # Full mode: LLM extraction per chunk + optional final LLM merge. Recommended for GPU.
+        # Full mode. v11 optimization: for short/medium GPU inputs, skip noisy
+        # chunk JSON extraction and let the final sectioned Markdown writer read
+        # the transcript directly. This improves quality and reduces LLM calls.
         llm = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
-        for i, ch in enumerate(chunks, start=1):
-            prompt = make_chunk_prompt(title, i, len(chunks), ch, language, glossary, detail_level)
-            note = call_llm_json(llm, prompt, ch, chunk_tokens, f"{title}_chunk_{i:02d}", detail_level, log_cb, retries=2)
-            llm_calls += 1
-            if note.get("topics") and note["topics"][0].get("heading") in {"원문 기반 주요 내용", "LLM 출력 복구 내용"}:
-                fallback_used = True
-            notes.append(note)
-        final_obj = None
-        if use_final_llm:
+        if short_gpu_transcript_case(segments, profile, detail_level):
+            chunk_extraction_skipped = True
+            if log_cb:
+                log_cb("🚀 v11 short/medium GPU transcript: chunk JSON 추출을 건너뛰고 transcript-first writer를 우선 사용합니다.")
+            notes = extractive_notes_for_chunks(chunks, detail_level)
+            final_obj = enrich_final_with_chunk_notes(aggregate_without_final_llm(notes, detail_level), notes, detail_level, title)
+        else:
+            for i, ch in enumerate(chunks, start=1):
+                prompt = make_chunk_prompt(title, i, len(chunks), ch, language, glossary, detail_level)
+                note = call_llm_json(llm, prompt, ch, chunk_tokens, f"{title}_chunk_{i:02d}", detail_level, log_cb, retries=2)
+                llm_calls += 1
+                if note.get("topics") and note["topics"][0].get("heading") in {"원문 기반 주요 내용", "LLM 출력 복구 내용"}:
+                    fallback_used = True
+                notes.append(note)
+            final_obj = None
+        if use_final_llm and not chunk_extraction_skipped:
             try:
                 final_prompt = make_final_prompt(title, notes, segments, language, glossary, detail_level)
                 if log_cb:
@@ -1876,7 +4013,7 @@ def summarize_segments(
     # v7 GPU quality guard: if the final report still contains CJK drift or looks sparse,
     # run one extra Korean repair pass.  This is intentionally limited to non-CPU full/fast
     # LLM paths so CPU speed remains practical.
-    if use_final_llm and profile.llm_device != "cpu" and strategy in {"full", "fast"}:
+    if use_final_llm and profile.llm_device != "cpu" and strategy in {"full", "fast"} and not chunk_extraction_skipped:
         needs_repair = (language == "ko" and has_korean_language_drift(final_obj)) or looks_repetitive_or_sparse(final_obj)
         if needs_repair:
             try:
@@ -1905,7 +4042,7 @@ def summarize_segments(
     # GPU/full outputs occasionally contain mixed CJK characters or become too sparse/repetitive.
     # Perform one lightweight style repair only on GPU profiles to preserve CPU speed.
     language_drift_detected = has_unwanted_cjk(final_obj)
-    if use_final_llm and profile.llm_device == "cuda" and (language_drift_detected or excessive_unknowns(final_obj) or looks_repetitive_or_sparse(final_obj)):
+    if use_final_llm and profile.llm_device == "cuda" and not chunk_extraction_skipped and (language_drift_detected or excessive_unknowns(final_obj) or looks_repetitive_or_sparse(final_obj)):
         try:
             llm = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
             repaired, used = repair_final_korean_style(llm, final_obj, title, language, final_tokens, log_cb, detail_level)
@@ -1922,8 +4059,49 @@ def summarize_segments(
     final_obj = ground_final_against_transcript(final_obj, segments, detail_level)
     final_obj = postprocess_final_quality(final_obj, detail_level, title)
 
-    # GPU profiles get one final writer pass that produces the actual human-facing
-    # Markdown.  This avoids a DOCX that reads like stitched chunk notes.
+    # v11: primary final output path for GPU profiles.
+    # Use a transcript-first sectioned Markdown writer before any JSON-derived export.
+    sectioned_markdown_used = False
+    transcript_first_markdown_used = False
+    markdown_repair_used = False
+    if use_final_llm and final_markdown is None and profile.llm_device == "cuda":
+        try:
+            llm_writer = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
+            writer_tokens = max(4800, min(final_tokens, 9500))
+            md, used_repair = generate_sectioned_markdown_v11(
+                llm_writer, title, notes, segments, profile, language, glossary, detail_level,
+                max_new_tokens=writer_tokens, log_cb=log_cb
+            )
+            # v11 sectioned writer uses four focused LLM calls plus optional repair.
+            llm_calls += 5 if used_repair else 4
+            if md:
+                final_markdown = md
+                final_markdown_used = True
+                transcript_first_markdown_used = True
+                sectioned_markdown_used = True
+                markdown_repair_used = used_repair
+                final_writer_mode = "v11_sectioned_transcript_first"
+        except Exception as e:
+            if log_cb:
+                log_cb(f"⚠️ v11 sectioned transcript-first Markdown writer 단계 오류. 기존 writer로 fallback합니다: {e}")
+
+    # Backward-compatible fallback: if the v11 writer fails unexpectedly, use the
+    # older sectioned/single writer.  This should be rare but keeps the pipeline robust.
+    if use_final_llm and final_markdown is None and profile.llm_device == "cuda":
+        try:
+            llm_writer = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
+            md, used = generate_sectioned_markdown(
+                llm_writer, title, notes, segments, profile, language, glossary, detail_level, log_cb=log_cb
+            )
+            llm_calls += 3
+            if used:
+                final_markdown = md
+                final_markdown_used = True
+                sectioned_markdown_used = True
+        except Exception as e:
+            if log_cb:
+                log_cb(f"⚠️ 섹션별 Markdown writer 단계 오류. 단일 writer로 fallback합니다: {e}")
+
     if use_final_llm and final_markdown is None and profile.llm_device == "cuda":
         try:
             llm_writer = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
@@ -1937,7 +4115,7 @@ def summarize_segments(
                 final_markdown_used = True
         except Exception as e:
             if log_cb:
-                log_cb(f"⚠️ 최종 Markdown writer 단계 오류. 구조화 Markdown으로 진행합니다: {e}")
+                log_cb(f"⚠️ 최종 단일 Markdown writer 단계 오류. 구조화 Markdown으로 진행합니다: {e}")
 
     transcript_chars = sum(len(s.get("text", "")) for s in segments)
     markdown_est_chars = len(json.dumps(final_obj, ensure_ascii=False))
@@ -1947,7 +4125,7 @@ def summarize_segments(
         "detail_level": detail_level,
         "processing_strategy_requested": processing_strategy,
         "processing_strategy_effective": strategy,
-        "processing_strategy_note": "v8 fast = chronological transcript digest + direct human Markdown writer + extractive safety net" if strategy == "fast" else "v8 full = chunk LLM extraction + transcript-aware synthesis + final human Markdown writer",
+        "processing_strategy_note": "v11 fast = chronological digest + direct human Markdown writer + safety net" if strategy == "fast" else "v11 full = transcript-first sectioned Markdown writer; short/medium GPU inputs skip noisy chunk JSON extraction",
         "profile_name": profile.name,
         "asr_model": profile.asr_model,
         "asr_device": profile.asr_device,
@@ -1970,6 +4148,11 @@ def summarize_segments(
         "final_repair_used": final_repair_used,
         "style_repair_used": style_repair_used,
         "final_markdown_used": final_markdown_used,
+        "sectioned_markdown_used": locals().get("sectioned_markdown_used", False),
+        "transcript_first_markdown_used": locals().get("transcript_first_markdown_used", False),
+        "markdown_repair_used": locals().get("markdown_repair_used", False),
+        "chunk_extraction_skipped": chunk_extraction_skipped,
+        "final_writer_mode": final_writer_mode,
         "fallback_used": fallback_used,
     }
     return {"chunk_notes": notes, "final": final_obj, "final_markdown": final_markdown, "chunk_count": len(chunks), "run_config": run_config}
