@@ -2,16 +2,16 @@
 
 
 
-## v14 품질 개선 사항
+## v15 품질 개선 사항
 
 - GPU 프로필에서 최종 DOCX 생성 경로를 transcript-first Markdown writer 중심으로 변경했습니다.
 - 짧거나 중간 길이의 transcript는 JSON 병합 결과에 의존하지 않고 최종 writer가 원문 흐름을 직접 보고 문서를 작성합니다.
 - 최종 Markdown 초안에 JSON 누출, 중국어/일본어/한자 혼입, 조각난 발화체가 섞이면 1회 repair를 수행한 뒤, 그래도 부족하면 안전한 원문 기반 Markdown으로 대체합니다.
 - 이 변경은 특정 샘플이 아니라 general domain 회의·강의·인터뷰·발표·설명 영상 정리 품질을 높이는 것을 목표로 합니다.
 
-## v14 GPU 품질 개선 사항
+## v15 GPU 품질 개선 사항
 
-`general_meeting_v14`에서는 GPU profile, 특히 `gpu_balanced`의 DOCX 품질을 개선했습니다. transcript chunk를 조금 더 작게 나누고, 최종 병합 단계에서 chunk note뿐 아니라 시간순 transcript digest를 함께 사용합니다. 또한 한국어 문체/중국어 혼입 보정, 근거 표기 개선, general domain용 prompt를 강화했습니다.
+`general_meeting_v15`에서는 GPU profile, 특히 `gpu_balanced`의 DOCX 품질을 개선했습니다. transcript chunk를 조금 더 작게 나누고, 최종 병합 단계에서 chunk note뿐 아니라 시간순 transcript digest를 함께 사용합니다. 또한 한국어 문체/중국어 혼입 보정, 근거 표기 개선, general domain용 prompt를 강화했습니다.
 
 GPU 권장 설정:
 
@@ -224,7 +224,7 @@ python install.py --torch cuda
 
 ### v6 CPU 최적화 변경 사항
 
-- `PIPELINE_VERSION`은 `general_meeting_v14`입니다.
+- `PIPELINE_VERSION`은 `general_meeting_v15`입니다.
 - CPU `auto` 모드는 더 이상 모든 chunk마다 LLM을 호출하지 않습니다. 추출 기반 chunk note를 만든 뒤 최종 LLM 1회로 문서를 다듬습니다.
 - 이 방식은 CPU 실행 시간을 줄이면서도 주제별 상세 내용을 보존하도록 설계되었습니다.
 - 반복 문구를 줄이기 위한 generation 설정과 후처리 로직을 추가했습니다.
@@ -233,9 +233,9 @@ python install.py --torch cuda
 - `run_config.json`에 `processing_strategy_effective`와 `llm_calls`가 기록됩니다.
 
 
-## v14 Quality Update
+## v15 Quality Update
 
-Version v14 changes the GPU full-quality path to a direct transcript-first Markdown writer. Earlier versions could still produce sparse documents because intermediate JSON or chunk-based notes dominated the final DOCX. v14 asks the GPU LLM to write the final human-facing report directly from the timestamped transcript, then applies a quality check for missing sections, JSON leakage, mixed CJK characters, excessive `명시적으로 확인되지 않음`, and low-value keyword lists.
+Version v15 changes the GPU full-quality path to a direct transcript-first Markdown writer. Earlier versions could still produce sparse documents because intermediate JSON or chunk-based notes dominated the final DOCX. v15 asks the GPU LLM to write the final human-facing report directly from the timestamped transcript, then applies a quality check for missing sections, JSON leakage, mixed CJK characters, excessive `명시적으로 확인되지 않음`, and low-value keyword lists.
 
 For GPU experiments, recommended settings are:
 
@@ -248,3 +248,15 @@ Use final LLM: enabled
 ```
 
 For domain-specific recordings, provide glossary hints such as names, project names, product names, acronyms, and known ASR correction pairs.
+
+## v16 품질 개선 사항
+
+`general_meeting_v16`에서는 최종 문서 생성 구조를 변경했습니다. 기존처럼 chunk 추출 결과나 깨지기 쉬운 JSON 병합 결과에 의존하지 않고, 먼저 transcript에서 편집자 관점의 content plan을 만든 뒤 로컬 LLM이 이를 다듬도록 구성했습니다. LLM 결과가 빈약하거나 깨지면 deterministic editor draft를 사용하므로, DOCX가 transcript 조각 나열처럼 무너지는 상황을 줄였습니다.
+
+주요 변경 사항:
+
+- General Domain용 편집자식 content plan을 먼저 생성
+- 회의, 교육/강의, 인터뷰, 발표, 해설 녹음에 맞는 문서 구조 적용
+- 의미 없는 빈도 단어가 핵심 개념/용어로 들어가는 문제 완화
+- 핵심 개념, 실행 항목, 리스크, 용어 섹션을 사람이 읽기 쉬운 설명형 문장으로 구성
+- `run_config.json`에 `pipeline_version=general_meeting_v16` 및 LLM polish 사용 여부 기록

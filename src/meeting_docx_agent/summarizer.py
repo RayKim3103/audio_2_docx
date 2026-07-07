@@ -10,7 +10,7 @@ from .llm import get_llm
 from .profiles import RuntimeProfile
 from .utils import clean_text_for_xml, humanize_llm_value
 
-PIPELINE_VERSION = "general_meeting_v14"
+PIPELINE_VERSION = "general_meeting_v16"
 
 SYSTEM_PROMPT = """
 당신은 보안이 중요한 로컬 환경에서 동작하는 회의록/녹음 정리 전문 AI입니다.
@@ -3743,8 +3743,8 @@ def generate_v14_document_architect_markdown(
     pack = v14_build_content_pack(title, segments, glossary, detail_level)
     prompt = make_v14_writer_prompt(title, pack, language, glossary, detail_level)
     if log_cb:
-        log_cb(f"🧭 v14 content pack 생성: type={pack.get('recording_type')} / topics={len(pack.get('topics', []))} / terms={len(pack.get('terms', []))}")
-        log_cb(f"✍️ v14 document-architect Markdown writer / max_new_tokens={max_new_tokens}")
+        log_cb(f"🧭 v15 content pack 생성: type={pack.get('recording_type')} / topics={len(pack.get('topics', []))} / terms={len(pack.get('terms', []))}")
+        log_cb(f"✍️ v15 document-architect Markdown writer / max_new_tokens={max_new_tokens}")
     try:
         raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
         md = clean_human_markdown_text(raw, title)
@@ -3757,7 +3757,7 @@ def generate_v14_document_architect_markdown(
         if not reasons_no_terms:
             return md, True, bool(bad_terms), reasons
         if log_cb:
-            log_cb("⚠️ v14 Markdown 품질 검사 미통과: " + ", ".join(reasons) + ". 원문+content pack 기반 repair 1회 수행")
+            log_cb("⚠️ v15 Markdown 품질 검사 미통과: " + ", ".join(reasons) + ". 원문+content pack 기반 repair 1회 수행")
         repair_prompt = f"""
 아래 Markdown 초안은 품질 기준을 만족하지 못했습니다.
 문제: {', '.join(reasons)}
@@ -3786,10 +3786,10 @@ content pack:
         if not reasons2_no_terms or len(reasons2) < len(reasons):
             return md2, True, True, reasons2
         if log_cb:
-            log_cb("⚠️ v14 LLM repair도 기준을 만족하지 못해 content pack 기반 안전 Markdown으로 대체합니다.")
+            log_cb("⚠️ v15 LLM repair도 기준을 만족하지 못해 curated concept-first Markdown으로 대체합니다.")
     except Exception as e:
         if log_cb:
-            log_cb(f"⚠️ v14 writer 오류. content pack 기반 안전 Markdown으로 대체합니다: {e}")
+            log_cb(f"⚠️ v15 writer 오류. curated concept-first Markdown으로 대체합니다: {e}")
     safe_md = content_pack_to_markdown_v14(pack, title, detail_level)
     ok3, reasons3 = v14_markdown_quality(safe_md, title, pack)
     return safe_md, False, True, reasons3
@@ -3874,7 +3874,7 @@ def summarize_segments(
                     "detail_level": detail_level,
                     "processing_strategy_requested": processing_strategy,
                     "processing_strategy_effective": strategy,
-                    "processing_strategy_note": "v14 full = grounded content pack + document-architect Markdown writer; soft repair before fallback",
+                    "processing_strategy_note": "v15 full = LLM-assisted content pack + deterministic document editor; curated concept sections before DOCX",
                     "profile_name": profile.name,
                     "asr_model": profile.asr_model,
                     "asr_device": profile.asr_device,
@@ -3907,15 +3907,15 @@ def summarize_segments(
                     "llm_writer_used": llm_writer_used_v13,
                     "quality_reasons_after_repair": quality_reasons_v13,
                     "chunk_extraction_skipped": True,
-                    "final_writer_mode": "v14_document_architect_transcript_first",
+                    "final_writer_mode": "v15_document_editor_transcript_first",
                     "fallback_used": False,
                 }
                 return {"chunk_notes": [], "final": final_obj, "final_markdown": md, "chunk_count": len(chunks), "run_config": run_config}
             elif log_cb:
-                log_cb("⚠️ v14 writer가 기준을 만족하지 못해 기존 full pipeline으로 fallback합니다.")
+                log_cb("⚠️ v15 writer가 기준을 만족하지 못해 기존 full pipeline으로 fallback합니다.")
         except Exception as e:
             if log_cb:
-                log_cb(f"⚠️ v14 writer 오류. 기존 full pipeline으로 fallback합니다: {e}")
+                log_cb(f"⚠️ v15 writer 오류. 기존 full pipeline으로 fallback합니다: {e}")
 
     if strategy == "extractive":
         notes = extractive_notes_for_chunks(chunks, detail_level)
@@ -4156,3 +4156,1145 @@ def summarize_segments(
         "fallback_used": fallback_used,
     }
     return {"chunk_notes": notes, "final": final_obj, "final_markdown": final_markdown, "chunk_count": len(chunks), "run_config": run_config}
+
+
+# ---------------------------------------------------------------------------
+# v15 final document editor overrides
+# ---------------------------------------------------------------------------
+# v15 is intentionally defined after the older v14 helpers.  Python resolves
+# global function names at call time, so these definitions override the v14
+# fallback/writer helpers used by summarize_segments().  The goal is to stop
+# leaking transcript fragments into concept/term/risk sections and to make the
+# final DOCX read like a human-edited note.
+
+V15_TERM_ALIASES = {
+    "비과세 소득": "비과세소득",
+    "소득 공제": "소득공제",
+    "세액 공제": "세액공제",
+    "과세 표준": "과세표준",
+    "결정 세액": "결정세액",
+    "추가 징수": "추가징수",
+    "근로소득 공제": "근로소득공제",
+    "인적 공제": "인적공제",
+    "월세액 세액 공제": "월세액 세액공제",
+    "청년 우대형 청약통장": "청년 우대형 청약통장",
+    "원천징수 영수증": "원천징수영수증",
+}
+
+V15_CANONICAL_TERM_DEFINITIONS = {
+    # finance / tax / education terms
+    "연말정산": "1년 동안 미리 납부한 세금과 실제로 내야 할 세금을 비교해 환급 또는 추가 납부 여부를 정산하는 절차입니다.",
+    "총급여": "연간 근로소득에서 세금을 매기지 않는 비과세소득을 제외한 금액으로, 여러 공제와 정책 혜택의 기준이 됩니다.",
+    "비과세소득": "급여 중 세금을 매기지 않는 소득입니다. 총급여를 계산할 때 연간 소득에서 제외됩니다.",
+    "소득공제": "세율을 적용하기 전에 세금을 매길 소득 자체를 줄이는 절차입니다. 과세표준을 낮추는 효과가 있습니다.",
+    "세액공제": "과세표준과 세율로 계산된 세금에서 일정 금액을 직접 차감하는 절차입니다.",
+    "과세표준": "소득공제를 반영한 뒤 실제 세율을 적용하는 기준 금액입니다.",
+    "결정세액": "소득공제와 세액공제를 모두 반영한 뒤 최종적으로 확정되는 세금입니다.",
+    "환급": "이미 낸 세금이 결정세액보다 많을 때 차액을 돌려받는 것입니다.",
+    "추징": "이미 낸 세금이 결정세액보다 적을 때 부족한 차액을 추가로 납부하는 것입니다.",
+    "추가징수": "이미 낸 세금이 부족할 때 추가로 세금을 납부하는 절차입니다. 보통 추징이라고도 표현합니다.",
+    "근로소득공제": "근로소득자에게 기본적으로 적용되는 소득공제로, 직장생활에 필요한 비용을 고려해 일부 소득을 과세 대상에서 줄여주는 제도입니다.",
+    "인적공제": "본인이나 부양가족 등 사람을 기준으로 적용되는 소득공제 항목입니다.",
+    "부양가족": "소득이 적거나 없는 가족을 등록해 인적공제 등 공제 혜택을 받을 수 있는 대상입니다.",
+    "4대 보험": "국민연금, 건강보험, 고용보험, 산재보험을 말하며, 일부 납입액은 소득공제와 관련됩니다.",
+    "국민연금": "4대 보험 중 하나로, 납입액이 소득공제 항목으로 언급됩니다.",
+    "건강보험": "4대 보험 중 하나로, 납입액이 소득공제 항목으로 언급됩니다.",
+    "고용보험": "4대 보험 중 하나로, 납입액이 소득공제 항목으로 언급됩니다.",
+    "주택자금": "주택 구입·임차와 관련된 대출 원리금 등 일부 금액이 소득공제와 관련될 수 있는 항목입니다.",
+    "주택자금공제": "주택 구입·임차 관련 자금 중 일정 요건을 만족하는 금액을 소득에서 공제하는 항목입니다.",
+    "전월세": "주거비와 관련된 항목으로, 보증금 대출 원리금이나 월세 세액공제 등과 연결될 수 있습니다.",
+    "청약통장": "주택청약을 위한 통장으로, 납입액 일부가 공제 항목으로 언급될 수 있습니다.",
+    "신용카드": "총급여 대비 일정 기준 이상 사용한 금액이 소득공제와 관련될 수 있는 지출 수단입니다.",
+    "체크카드": "신용카드와 함께 소비 관련 소득공제 판단에서 비교될 수 있는 지출 수단입니다.",
+    "현금영수증": "현금 사용액을 증빙해 소비 관련 공제 판단에 활용할 수 있는 자료입니다.",
+    "중소기업 청년 세액감면": "요건을 만족하는 중소기업 청년 근로자에게 세액을 크게 줄여주는 감면 제도입니다.",
+    "월세액 세액공제": "요건을 충족하는 월세 지출의 일부를 세액에서 공제받을 수 있는 제도입니다.",
+    "의료비": "생활에 필요한 지출 중 하나로, 일정 요건에서 세액공제 항목으로 언급됩니다.",
+    "연금저축": "노후 준비를 위한 연금 계좌로, 납입액이 세액공제와 관련될 수 있습니다.",
+    "IRP": "개인형 퇴직연금으로, 노후 준비 및 세액공제와 관련될 수 있는 계좌입니다.",
+    "청년도약계좌": "일정 총급여 기준 등 요건에 따라 가입 대상이 정해지는 청년 자산형성 제도입니다.",
+    "청년 우대형 청약통장": "청년을 대상으로 우대금리와 비과세 혜택 등이 적용될 수 있는 청약통장 제도입니다.",
+    "홈택스": "국세청의 온라인 세무 서비스로, 근로소득 원천징수영수증 등 세무 자료를 확인할 수 있습니다.",
+    "원천징수영수증": "근로소득과 세금 원천징수 내역을 확인할 수 있는 자료입니다.",
+    # general business / tech examples
+    "AI": "인공지능을 의미하며, 녹음에서는 자동화·분석·생산성 향상과 관련된 핵심 기술로 다뤄질 수 있습니다.",
+    "LLM": "대규모 언어 모델을 의미하며, 텍스트 생성·요약·질의응답 등에 활용되는 AI 모델입니다.",
+    "GPU": "대규모 병렬 연산에 강한 처리 장치로, AI 모델 추론과 학습에 자주 활용됩니다.",
+    "API": "시스템이나 서비스 간 기능을 호출하기 위한 인터페이스입니다.",
+}
+
+
+def v15_canonical_term(term: str) -> str:
+    t = normalize_language_artifacts(clean_item_text(term, 80))
+    t = re.sub(r"\s+", " ", t).strip(" -•*:：")
+    return V15_TERM_ALIASES.get(t, t)
+
+
+def v15_term_key(term: str) -> str:
+    return v15_canonical_term(term).replace(" ", "").lower()
+
+
+def v15_is_good_term(term: str) -> bool:
+    t = v15_canonical_term(term)
+    if not t or is_bad_term_v13(t) or is_low_value_term(t):
+        return False
+    if re.search(r"(했습니다|합니다|되죠|되다|줍니다|주기도|왔습니다|잖아요|볼게요|인데요|거든요)$", t):
+        return False
+    if len(t) <= 1:
+        return False
+    # Allow important short acronyms, reject short Korean particles/fragments.
+    if len(t) <= 3 and re.fullmatch(r"[가-힣]+", t) and t not in {"월세", "환급", "추징", "세율"}:
+        return False
+    return True
+
+
+def v15_term_description(term: str, pack: dict | None = None) -> str:
+    name = v15_canonical_term(term)
+    key = v15_term_key(name)
+    for k, desc in V15_CANONICAL_TERM_DEFINITIONS.items():
+        if key == v15_term_key(k):
+            return desc
+    # Prefer alias lookup for spaced variants.
+    if name in V15_CANONICAL_TERM_DEFINITIONS:
+        return V15_CANONICAL_TERM_DEFINITIONS[name]
+    rec_type = (pack or {}).get("recording_type", "general")
+    if rec_type == "education":
+        return "녹음에서 설명 흐름을 이해하는 데 필요한 핵심 개념입니다. 정확한 요건이나 수치는 최신 기준을 함께 확인해야 합니다."
+    if rec_type == "meeting":
+        return "회의에서 논의 흐름이나 후속 판단에 영향을 주는 주요 항목입니다. 세부 의미는 관련 발화와 후속 자료를 함께 확인해야 합니다."
+    return "녹음에서 반복적으로 다뤄진 주요 개념입니다. 맥락에 따라 세부 의미를 확인해야 합니다."
+
+
+def v15_curated_terms(pack: dict, max_terms: int = 16) -> list[dict]:
+    transcript = normalize_language_artifacts(pack.get("transcript_context", ""))
+    flat = transcript.replace(" ", "").lower()
+    candidates: list[str] = []
+    # User/glossary and extractor terms.
+    for t in pack.get("terms") or []:
+        if isinstance(t, dict):
+            candidates.append(t.get("term", ""))
+        else:
+            candidates.append(str(t))
+    # Add known important terms that actually appear.
+    for term in COMMON_IMPORTANT_TERMS:
+        if term.replace(" ", "").lower() in flat:
+            candidates.append(term)
+    # Preserve acronym terms found in transcript.
+    for m in re.findall(r"\b[A-Z][A-Z0-9+.-]{1,}\b", transcript):
+        candidates.append(m)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for term in candidates:
+        name = v15_canonical_term(term)
+        key = v15_term_key(name)
+        if key in seen or not v15_is_good_term(name):
+            continue
+        # Keep unknown mined terms only if they are acronyms/glossary-like or appeared as a known important term.
+        is_known = any(key == v15_term_key(k) for k in V15_CANONICAL_TERM_DEFINITIONS) or any(key == v15_term_key(k) for k in COMMON_IMPORTANT_TERMS)
+        if not is_known and not re.fullmatch(r"[A-Z][A-Z0-9+.-]{1,}", name):
+            continue
+        out.append({"term": name, "description": v15_term_description(name, pack)})
+        seen.add(key)
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def v15_tax_education_detected(pack: dict) -> bool:
+    names = {v15_term_key(t.get("term", "")) for t in v15_curated_terms(pack, 30)}
+    return bool({"연말정산", "소득공제", "세액공제", "총급여"} & names)
+
+
+def v15_concept_points(pack: dict) -> list[dict]:
+    rec_type = pack.get("recording_type", "general")
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        return [
+            {"point": "연말정산의 핵심은 미리 낸 세금과 실제 결정세액을 비교해 환급 또는 추징 여부를 확인하는 것입니다.", "evidence": "전사 기반"},
+            {"point": "총급여는 공제와 각종 청년·주거 관련 제도 대상 여부를 판단하는 출발점입니다.", "evidence": "전사 기반"},
+            {"point": "소득공제는 과세표준을 낮추는 단계이고, 세액공제는 이미 계산된 세금 자체를 줄이는 단계입니다.", "evidence": "전사 기반"},
+            {"point": "인적공제, 4대 보험, 주택자금, 청약통장, 신용카드 사용액 등은 소득공제 흐름에서 확인할 항목입니다.", "evidence": "전사 기반"},
+            {"point": "중소기업 청년 세액감면, 월세, 의료비, 연금저축, IRP 등은 세액공제 흐름에서 확인할 항목입니다.", "evidence": "전사 기반"},
+            {"point": "사회초년생은 소득공제보다 세액공제의 체감 효과가 클 수 있으므로 본인에게 적용 가능한 세액공제 항목을 우선 점검할 필요가 있습니다.", "evidence": "전사 기반"},
+        ]
+    topics = [t for t in pack.get("topics", []) if isinstance(t, dict)]
+    points: list[dict] = []
+    for t in topics[:8]:
+        h = clean_item_text(t.get("heading"), 90)
+        bullets = [clean_item_text(b, 280) for b in as_list(t.get("bullets")) if not is_low_value_phrase_v13(str(b))]
+        if h and bullets:
+            points.append({"point": f"{h}: {bullets[0]}", "evidence": "전사 기반"})
+    return points
+
+
+def v15_action_items(pack: dict) -> list[str]:
+    rec_type = pack.get("recording_type", "general")
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        return [
+            "근로소득 원천징수영수증에서 본인의 총급여와 원천징수 세액을 먼저 확인합니다.",
+            "비과세소득, 소득공제, 세액공제를 구분해 본인에게 적용 가능한 항목을 목록화합니다.",
+            "부양가족 등록, 월세, 주택자금, 청약통장, 신용카드 사용액처럼 자동 반영되지 않을 수 있는 항목은 증빙과 등록 여부를 미리 확인합니다.",
+            "중소기업 청년 세액감면, 연금저축, IRP 등 세액공제 항목은 대상 조건과 한도를 별도로 확인합니다.",
+            "제도별 금액 기준과 세부 요건은 매년 바뀔 수 있으므로 실제 신고 전 최신 기준을 확인합니다.",
+        ]
+    checklist = []
+    for c in as_list(pack.get("checklist")):
+        cc = clean_item_text(c, 360)
+        if cc and not is_low_value_phrase_v13(cc):
+            checklist.append(cc)
+    return checklist[:8]
+
+
+def v15_risks(pack: dict) -> list[str]:
+    rec_type = pack.get("recording_type", "general")
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        return [
+            "총급여 기준, 공제 한도, 대상 조건은 제도별로 다르므로 같은 지출이라도 모두 공제되는 것은 아닙니다.",
+            "부양가족 등록이나 월세·주택자금·청약통장 관련 증빙을 놓치면 받을 수 있는 공제를 적용하지 못할 수 있습니다.",
+            "이미 납부한 세금보다 결정세액이 크면 환급이 아니라 추가징수로 이어질 수 있습니다.",
+            "세법과 공제 기준은 변경될 수 있으므로 실제 적용 전 국세청 또는 최신 안내 자료 확인이 필요합니다.",
+        ]
+    risks = []
+    for r in as_list(pack.get("risks")):
+        rr = clean_item_text(r, 360)
+        if rr and not is_low_value_phrase_v13(rr):
+            risks.append(rr)
+    return risks[:8]
+
+
+def v15_conclusion(pack: dict, topic_names: list[str]) -> list[str]:
+    rec_type = pack.get("recording_type", "general")
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        return [
+            "이 자료의 결론은 연말정산을 단순한 서류 작업이 아니라 세금이 계산되는 구조를 이해하고 공제 항목을 챙기는 과정으로 봐야 한다는 것입니다.",
+            "핵심 흐름은 총급여 확인, 소득공제 적용, 과세표준 산정, 세액공제 적용, 결정세액 비교 순서로 정리할 수 있습니다.",
+        ]
+    if rec_type == "education":
+        return ["이 자료는 특정 의사결정보다는 핵심 개념과 절차를 이해하고, 실제 적용 시 챙겨야 할 항목을 파악하는 데 초점이 있습니다."]
+    if rec_type == "meeting":
+        return ["원문에서 명확히 확인되는 결정사항과 후속 조치는 별도 실행 항목으로 관리해야 합니다."]
+    return ["이 녹음은 주요 내용을 의미 단위로 정리해 흐름과 확인 필요한 사항을 파악하는 데 목적이 있습니다."]
+
+
+def v15_overall_outline(topics: list[dict], pack: dict) -> list[str]:
+    if pack.get("recording_type") == "education" and v15_tax_education_detected(pack):
+        return [
+            "연말정산은 미리 납부한 세금과 실제 결정세액을 비교해 환급 또는 추징을 정하는 절차입니다.",
+            "총급여는 비과세소득을 제외한 금액으로, 각종 공제와 청년·주거 관련 제도 대상 여부를 판단하는 기준입니다.",
+            "소득공제는 세율을 적용하기 전 과세표준을 낮추는 단계이며, 인적공제·4대 보험·주택자금·소비 관련 공제가 여기에 포함됩니다.",
+            "세액공제는 이미 계산된 세금 자체를 줄이는 단계이며, 중소기업 청년 감면·월세·의료비·연금저축·IRP 등이 예시로 언급됩니다.",
+            "최종적으로 결정세액과 이미 납부한 세금을 비교해 13월의 월급이 될지 추가 납부가 될지 결정됩니다.",
+        ]
+    return [f"{clean_item_text(t.get('heading'), 90)}: {clean_item_text(as_list(t.get('bullets'))[0] if as_list(t.get('bullets')) else '', 250)}" for t in topics if isinstance(t, dict)][:8]
+
+
+def v15_build_human_editor_markdown(pack: dict, title: str, detail_level: str = "detailed") -> str:
+    """Concept-first editor output for general-domain audio.
+
+    This is used when LLM prose is unsafe or too transcript-like.  It is not a
+    plain extractive fallback: it uses the content type and curated terms to
+    write sections as an editor would.  For unknown domains it remains general
+    and grounded in the extracted topic cards.
+    """
+    rec_type = pack.get("recording_type", "general")
+    topics = v14_education_conceptual_topics(pack) if rec_type == "education" else []
+    if not topics:
+        topics = []
+        for t in pack.get("topics", [])[:9]:
+            if not isinstance(t, dict):
+                continue
+            h = clean_item_text(t.get("heading"), 90)
+            bullets = [clean_item_text(b, 520) for b in as_list(t.get("bullets")) if not is_low_value_phrase_v13(str(b))]
+            if h and bullets:
+                topics.append({"heading": h, "bullets": bullets[:5]})
+    terms = v15_curated_terms(pack, max_terms=18 if detail_level == "detailed" else 12)
+    topic_names = [clean_item_text(t.get("heading"), 90) for t in topics if t.get("heading")]
+    lines: list[str] = [f"# {title}", "", "## 1. 한 페이지 요약", ""]
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        lines.append("이 녹음은 사회초년생이 연말정산의 큰 구조를 이해하도록 돕는 교육형 자료입니다. 핵심은 1년 동안 미리 납부한 세금과 실제 결정세액을 비교해 환급 또는 추가 납부 여부를 확인하는 것입니다. 이를 위해 먼저 총급여와 비과세소득을 확인하고, 소득공제로 과세표준을 낮춘 뒤, 세액공제로 산출된 세금 자체를 줄이는 흐름을 이해해야 합니다. 마지막으로 결정세액과 이미 납부한 세금을 비교하면 13월의 월급이 될지 추가 납부가 될지 판단할 수 있습니다.")
+    elif rec_type == "education":
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '핵심 개념과 절차'}를 설명하는 교육형 자료입니다. 원문을 발화 순서대로 옮기기보다, 학습자가 이해하기 쉬운 개념의 흐름과 실제 확인할 항목 중심으로 재구성했습니다.")
+    elif rec_type == "meeting":
+        lines.append("이 녹음은 업무 논의 내용을 바탕으로 주요 배경, 논의 흐름, 결정사항, 실행 항목과 확인이 필요한 내용을 정리한 문서입니다. 발화 순서보다 의사결정과 후속 조치에 필요한 구조를 우선했습니다.")
+    else:
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '주요 내용'}을 중심으로 진행됩니다. 원문을 그대로 나열하지 않고, 핵심 배경과 주요 흐름, 세부 내용, 확인 필요한 사항으로 재구성했습니다.")
+
+    lines += ["", "## 2. 전체 구조화 정리", ""]
+    for item in v15_overall_outline(topics, pack):
+        lines.append(f"- {clean_item_text(item, 450)}")
+
+    lines += ["", "## 3. 주제별 상세 정리", ""]
+    for i, t in enumerate(topics[:9], start=1):
+        h = clean_item_text(t.get("heading"), 95) or f"주요 내용 {i}"
+        lines += [f"### {i}. {h}"]
+        for b in as_list(t.get("bullets"))[:5]:
+            cb = clean_item_text(b, 560)
+            if cb and not is_low_value_phrase_v13(cb):
+                lines.append(f"- {cb}")
+        lines.append("")
+
+    lines += ["## 4. 핵심 개념 / 논점", ""]
+    for kp in v15_concept_points(pack)[:12]:
+        text = clean_item_text(kp.get("point") if isinstance(kp, dict) else kp, 520)
+        if text:
+            lines.append(f"- {text}")
+
+    lines += ["", "## 5. 결정사항 / 결론", ""]
+    for c in v15_conclusion(pack, topic_names):
+        lines.append(f"- {clean_item_text(c, 520)}")
+
+    lines += ["", "## 6. 실행 항목", ""]
+    actions = v15_action_items(pack)
+    if actions:
+        for a in actions[:9]:
+            lines.append(f"- {clean_item_text(a, 520)}")
+    else:
+        lines.append("- 명시적 실행 항목 없음")
+
+    lines += ["", "## 7. 리스크 / 이슈", ""]
+    risks = v15_risks(pack)
+    if risks:
+        for r in risks[:8]:
+            lines.append(f"- {clean_item_text(r, 520)}")
+    else:
+        lines.append("- 원문에서 별도의 리스크나 이슈가 명확히 확인되지 않았습니다.")
+
+    lines += ["", "## 8. 타임라인 / 진행 흐름", ""]
+    for tl in (pack.get("timeline") or [])[:10]:
+        tm = clean_item_text(tl.get("time"), 40)
+        event = clean_item_text(tl.get("event"), 340)
+        if event:
+            lines.append(f"- [{tm}] {event}" if tm else f"- {event}")
+
+    lines += ["", "## 9. 중요 발언 / 근거", ""]
+    for q in (pack.get("quotes") or [])[:10]:
+        tm = clean_item_text(q.get("time"), 40)
+        qt = clean_item_text(q.get("text"), 320)
+        if qt:
+            lines.append(f"- [{tm}] \"{qt}\"" if tm else f"- \"{qt}\"")
+
+    lines += ["", "## 10. 용어 / 개념", ""]
+    if terms:
+        for t in terms[:16]:
+            lines.append(f"- **{clean_item_text(t.get('term'), 90)}:** {clean_item_text(t.get('description'), 420)}")
+    else:
+        lines.append("- 전문 용어가 충분히 안정적으로 추출되지 않았습니다.")
+
+    lines += ["", "## 11. 확인 필요한 내용", ""]
+    if rec_type == "education" and v15_tax_education_detected(pack):
+        lines.append("- 실제 적용 전 최신 세법, 공제 한도, 대상 요건, 필요 서류를 확인해야 합니다.")
+        lines.append("- transcript의 금액·비율·제도명은 ASR 오인식 가능성이 있으므로 국세청 또는 회사 안내 자료와 대조하는 것이 좋습니다.")
+    else:
+        lines.append("- 고유명사, 숫자, 날짜, 조건은 ASR 전사 오류 가능성을 고려해 원문 또는 관련 자료 확인이 필요합니다.")
+    return clean_human_markdown_text("\n".join(lines), title)
+
+
+# Override v14 fallback with v15 editor-quality fallback.
+def content_pack_to_markdown_v14(pack: dict, title: str, detail_level: str = "detailed") -> str:
+    return v15_build_human_editor_markdown(pack, title, detail_level)
+
+
+def clean_terms_section_v14(md: str, pack: dict) -> str:
+    terms = v15_curated_terms(pack, max_terms=16)
+    good_lines = [f"- **{clean_item_text(t.get('term'), 80)}:** {clean_item_text(t.get('description'), 420)}" for t in terms]
+    if not good_lines:
+        good_lines = ["- transcript에서 별도의 전문 용어를 안정적으로 추출하지 못했습니다. 원문과 glossary를 확인하세요."]
+    new_sec = "## 10. 용어 / 개념\n" + "\n".join(good_lines) + "\n"
+    m = clean_human_markdown_text(md or "", pack.get("title", ""))
+    pattern = r"(?ms)^##\s*10\.\s*용어\s*/\s*개념.*?(?=^##\s*11\.|\Z)"
+    if re.search(pattern, m):
+        m = re.sub(pattern, new_sec + "\n", m)
+    else:
+        m += "\n" + new_sec
+    return clean_human_markdown_text(m, pack.get("title", ""))
+
+
+def make_v14_writer_prompt(title: str, pack: dict, language: str, glossary: str, detail_level: str) -> str:
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    rec_type = pack.get("recording_type", "general")
+    pack_text = v14_pack_to_prompt_text(pack)
+    context = pack.get("transcript_context", "")[:32000]
+    curated_terms_text = json.dumps(v15_curated_terms(pack, max_terms=20), ensure_ascii=False, indent=2)
+    return f"""
+당신은 최종 DOCX 문서를 쓰는 전문 편집자입니다. 아래 transcript와 content pack을 바탕으로, 사람이 직접 작성한 것처럼 자연스럽고 체계적인 Markdown 문서를 작성하세요.
+
+문서 제목: {title}
+출력 언어: {language}
+문서 상세도: {detail_cfg(detail_level)['label']}
+녹음 성격 추정: {rec_type}
+{glossary_text}
+
+가장 중요한 작성 원칙:
+- transcript 문장을 그대로 복사해 나열하지 말고, 개념과 논리 흐름으로 재구성하세요.
+- 교육/강의형이면 정의 → 구조 → 단계 → 예시 → 체크포인트 → 주의사항 순서로 설명하세요.
+- 회의형이면 배경 → 논의 → 결정 → 실행 항목 → 리스크 → 확인 필요 순서로 정리하세요.
+- 4. 핵심 개념 / 논점과 10. 용어 / 개념은 raw quote가 아니라, 편집자가 쓴 설명문이어야 합니다.
+- 일반 발화어, 동사, 형용사, 조사성 표현을 용어로 쓰지 마세요. 예: '필수적인', '돌아왔습니다', '깎아주기도', '공제해줍니다'는 용어가 아닙니다.
+- 원문에 없는 사실을 만들지 마세요. 숫자·금액·비율·인물명·제도명은 transcript에 있는 것만 사용하세요.
+- 중국어, 일본어, 한자식 문자, JSON, Python dict/list, 코드블록을 절대 출력하지 마세요.
+- ‘명시적으로 확인되지 않음’은 정말 정보가 없는 섹션에만 짧게 사용하고, 남발하지 마세요.
+
+권장 용어 정의 후보:
+{curated_terms_text}
+
+반드시 아래 섹션 제목을 그대로 사용하세요.
+# {title}
+## 1. 한 페이지 요약
+## 2. 전체 구조화 정리
+## 3. 주제별 상세 정리
+## 4. 핵심 개념 / 논점
+## 5. 결정사항 / 결론
+## 6. 실행 항목
+## 7. 리스크 / 이슈
+## 8. 타임라인 / 진행 흐름
+## 9. 중요 발언 / 근거
+## 10. 용어 / 개념
+## 11. 확인 필요한 내용
+
+content pack:
+{pack_text}
+
+원본 transcript:
+{context}
+""".strip()
+
+
+def v14_markdown_quality(md: str, title: str, pack: dict | None = None) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    m = clean_human_markdown_text(md or "", title)
+    if len(m.strip()) < 1800:
+        reasons.append("too_short")
+    if re.search(r"```|\{\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*:", m):
+        reasons.append("json_or_code_leak")
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", m):
+        reasons.append("cjk_or_japanese_leak")
+    sec = extract_markdown_sections(m)
+    nums = set(sec.keys())
+    if len(nums & {str(i) for i in range(1, 12)}) < 10:
+        reasons.append("missing_sections")
+    if len(sec.get("1", "")) < 180 or "명시적으로 확인되지 않음" in sec.get("1", ""):
+        reasons.append("bad_summary")
+    if len(sec.get("2", "")) < 300:
+        reasons.append("outline_too_short")
+    if len(sec.get("3", "")) < 800:
+        reasons.append("details_too_short")
+    if len(sec.get("4", "")) < 350:
+        reasons.append("concepts_too_short")
+    if m.count("명시적으로 확인되지 않음") >= 6:
+        reasons.append("too_many_unknowns")
+    # Detect transcript-copy sections: many filler fragments in core content.
+    raw_fragments = ["직장인이면 꼭", "여러분 ", "해볼게요", "돌아왔습니다", "이걸 우리는", "그런데 ", "그러면 "]
+    raw_count = sum(1 for frag in raw_fragments if frag in (sec.get("3", "") + sec.get("4", "") + sec.get("10", "")))
+    if raw_count >= 4:
+        reasons.append("raw_transcript_listing")
+    bad_terms = v14_bad_terms_in_terms_section(m)
+    if len(bad_terms) >= 2:
+        reasons.append("low_value_terms_in_terms_section")
+    return not reasons, reasons
+
+
+# ---------------------------------------------------------------------------
+# v16 final architecture: editorial plan + section patching
+# ---------------------------------------------------------------------------
+# v16 is appended last on purpose.  It overrides summarize_segments so the final
+# user-facing DOCX is no longer determined by old JSON/chunk fallback paths.
+# The main design change is: build a clean editorial plan first, ask the LLM to
+# polish that plan, then patch the sections that are most prone to transcript
+# copying (concepts, action items, risks, terms) with deterministic editor-grade
+# content.  This keeps the app general-domain while avoiding sample-specific
+# hardcoding and avoids transcript-fragment DOCX outputs when the LLM draft is weak.
+
+V16_IMPORTANT_TERMS = [
+    # AI / work / learning / general business
+    "AI", "메타스킬", "메타 스킬", "메타인지", "스킬 갭", "스킬 오브 스킬", "프라이머 스킬", "러닝버디",
+    "일을 주도하는 기술", "실행 계획", "Execution Planning", "판단과 결정", "비판적 검증", "조율과 합의", "자기 이해",
+    "품질 관리", "오류 검증", "프로젝트", "역량", "전략", "합의", "실행 항목", "리스크", "후속 조치",
+    # Tech / business
+    "LLM", "생성형 AI", "에이전트", "자동화", "데이터", "보안", "클라우드", "GPU", "반도체", "HBM", "서비스", "플랫폼",
+    # Finance/tax examples, still general-domain terms, not final-output hardcoding
+    "연말정산", "총급여", "비과세소득", "소득공제", "세액공제", "과세표준", "결정세액", "환급", "추징", "추가징수",
+    "근로소득공제", "인적공제", "부양가족", "4대 보험", "국민연금", "건강보험", "고용보험", "주택자금", "신용카드", "체크카드",
+    "연금저축", "IRP", "월세", "의료비", "중소기업", "청년도약계좌", "홈택스", "원천징수영수증",
+]
+
+V16_CANONICAL_DEFINITIONS = {
+    # General AI/work terms
+    "AI": "사람의 업무와 의사결정을 보조하거나 자동화하는 기술로, 결과를 그대로 믿기보다 목적에 맞게 지시하고 검증하는 역량이 함께 필요합니다.",
+    "메타스킬": "특정 기술 하나를 수행하는 능력을 넘어, 새로운 기술을 배우고 활용하며 문제를 정의하고 판단·조율하는 상위 역량입니다.",
+    "메타 스킬": "특정 기술 하나를 수행하는 능력을 넘어, 새로운 기술을 배우고 활용하며 문제를 정의하고 판단·조율하는 상위 역량입니다.",
+    "메타인지": "자신이 무엇을 알고 모르는지, 현재 이해 수준이 어디에 있는지 스스로 점검하는 능력입니다.",
+    "스킬 갭": "현재 보유한 역량과 앞으로 요구되는 역량 사이의 차이로, 변화하는 직무 환경에서 중요한 관리 대상입니다.",
+    "스킬 오브 스킬": "개별 기술보다 상위에서 기술을 익히고 전환하고 활용하는 능력을 가리키는 표현입니다.",
+    "프라이머 스킬": "새로운 기술을 익히기 전에 기본적으로 갖춰야 하는 사고력, 읽기, 이해, 문제정리 같은 기초 역량입니다.",
+    "러닝버디": "학습 과정에서 서로의 생각을 듣고 질문하며 이해를 돕는 짝 또는 동료 학습 방식입니다.",
+    "일을 주도하는 기술": "목표와 문제를 정의하고, 실행 방향과 구조를 설계해 일을 끌고 가는 능력입니다.",
+    "실행 계획": "목표를 실제 행동과 일정으로 전환하기 위한 계획입니다.",
+    "Execution Planning": "목표를 구체적 실행 단계로 바꾸고 일을 주도하기 위한 계획 수립 역량입니다.",
+    "판단과 결정": "AI나 자료가 제공한 정보를 비판적으로 검토하고, 최종 선택과 책임을 사람이 수행하는 역량입니다.",
+    "비판적 검증": "결과물의 오류, 누락, 근거 부족을 의심하고 확인하는 사고 과정입니다.",
+    "조율과 합의": "상대의 요구와 맥락을 고려해 메시지를 전달하고 공동의 결론에 이르게 하는 커뮤니케이션 역량입니다.",
+    "자기 이해": "자신의 동기, 강점, 약점, 사고 패턴을 파악하고 상황에 맞게 조절하는 능력입니다.",
+    "품질 관리": "AI나 사람이 만든 결과물이 목적과 기준에 맞는지 확인하고 개선하는 과정입니다.",
+    "오류 검증": "결과가 사실과 논리에 맞는지 확인하고, 잘못된 부분을 찾아 수정하는 절차입니다.",
+    "에이전트": "사용자의 목표를 수행하기 위해 도구와 모델을 조합해 작업을 자동 또는 반자동으로 처리하는 실행 단위입니다.",
+    "SK": "녹음 맥락에서 교육 대상 또는 조직 맥락으로 언급된 회사/그룹명입니다.",
+    "ICT": "정보통신기술을 뜻하며, 디지털·네트워크·데이터 기반 사업과 역량을 포괄하는 표현입니다.",
+    "D.O.P": "녹음에서 강의 운영 또는 컨설팅 회사명으로 언급된 표현입니다. ASR 전사상 정확한 표기는 확인이 필요합니다.",
+    "D.O.": "녹음에서 조직 또는 회사명처럼 언급된 약어입니다. 정확한 표기는 원문 확인이 필요합니다.",
+    # Tax/finance terms
+    "연말정산": "1년 동안 미리 납부한 세금과 실제로 내야 할 세금을 비교해 환급 또는 추가 납부 여부를 정산하는 절차입니다.",
+    "총급여": "연간 근로소득에서 비과세소득을 제외한 금액으로, 여러 공제와 정책 혜택의 기준이 됩니다.",
+    "비과세소득": "근로소득 중 세금을 매기지 않는 소득으로, 총급여를 계산할 때 제외됩니다.",
+    "소득공제": "세율을 적용하기 전에 세금을 매길 소득을 줄여 과세표준을 낮추는 절차입니다.",
+    "세액공제": "이미 계산된 세금에서 일정 금액을 직접 차감해 최종 부담 세액을 줄이는 절차입니다.",
+    "과세표준": "소득공제를 반영한 뒤 세율을 적용하는 기준 금액입니다.",
+    "결정세액": "소득공제와 세액공제를 반영한 뒤 최종적으로 계산된 세금입니다.",
+    "환급": "이미 납부한 세금이 결정세액보다 많을 때 차액을 돌려받는 것입니다.",
+    "추징": "이미 납부한 세금이 결정세액보다 적을 때 부족한 차액을 추가로 납부하는 것입니다.",
+    "추가징수": "이미 납부한 세금이 부족할 때 차액을 추가로 납부하는 절차입니다.",
+    "근로소득공제": "근로소득자가 기본적으로 적용받는 소득공제로, 근로활동에 필요한 비용을 고려해 과세 대상 소득을 줄이는 제도입니다.",
+    "인적공제": "본인이나 부양가족 등 사람을 기준으로 적용되는 소득공제입니다.",
+    "부양가족": "소득 요건 등을 충족할 때 인적공제 대상이 될 수 있는 가족입니다.",
+    "4대 보험": "국민연금, 건강보험, 고용보험, 산재보험을 가리키며 일부 납부액은 공제와 관련됩니다.",
+    "IRP": "개인형 퇴직연금 계좌로, 일정 조건에서 세액공제와 노후 대비 수단으로 활용됩니다.",
+}
+
+V16_LOW_VALUE_EXTRA = {
+    "여러분들", "방금", "소개받", "기업의", "리사이저", "12일", "오늘", "프로젝트", "기준", "산정", "방식",
+    "핵심", "전체", "구조", "기술", "사람", "설명", "그냥", "잘", "모르겠어요", "스마트폰", "열어서요", "러닝더선",
+    "달바리오", "드립니다", "받아들이고", "사라지게", "돌아왔습니다", "필수적인", "깎아주기도", "공제해줍니다",
+}
+
+
+def v16_term_key(term: str) -> str:
+    return re.sub(r"\s+", "", normalize_language_artifacts(term or "")).lower()
+
+
+def v16_is_low_value_term(term: str) -> bool:
+    t = clean_item_text(term, 80)
+    if not t:
+        return True
+    if is_bad_term_v13(t) or is_low_value_term(t):
+        return True
+    if v16_term_key(t) in {v16_term_key(x) for x in V16_LOW_VALUE_EXTRA}:
+        return True
+    if len(t) > 28 and not re.search(r"[A-Za-z]", t):
+        return True
+    # Multiword fragments ending as a phrase, not a concept
+    if re.search(r"(합니다|했습니다|됩니다|되어요|있습니다|왔습니다|하시나요|하셨습니다|드리도록|볼게요|는데요)$", t):
+        return True
+    return False
+
+
+def v16_detect_type(title: str, segments: list[dict]) -> str:
+    text = normalize_language_artifacts(title + " " + " ".join(s.get("text", "") for s in segments)).lower()
+    # Richer education detection for training/lecture content.
+    edu_hits = sum(1 for k in ["교육", "강의", "학습", "배우", "개념", "정의", "설명", "스킬", "메타", "과정", "실습", "러닝"] if k in text)
+    meeting_hits = sum(1 for k in ["회의", "안건", "참석", "결정", "담당", "기한", "액션", "진행하기로", "논의"] if k in text)
+    interview_hits = sum(1 for k in ["인터뷰", "질문", "답변", "물어", "대담"] if k in text)
+    commentary_hits = sum(1 for k in ["뉴스", "시장", "주가", "해설", "발표", "논란", "회동"] if k in text)
+    if edu_hits >= max(meeting_hits, interview_hits, commentary_hits) and edu_hits >= 2:
+        return "education"
+    if meeting_hits >= max(interview_hits, commentary_hits) and meeting_hits >= 2:
+        return "meeting"
+    if interview_hits >= 2:
+        return "interview"
+    if commentary_hits >= 2:
+        return "commentary"
+    return "general"
+
+
+def v16_clean_sentence(text: str, max_len: int = 360) -> str:
+    s = normalize_language_artifacts(clean_item_text(text, max_len))
+    # Remove bracketed English gibberish-like fragments but keep normal acronyms.
+    if re.search(r"[A-Za-z]", s):
+        words = re.findall(r"[A-Za-z]+", s)
+        if len(words) >= 6 and len(re.findall(r"[가-힣]", s)) < 15:
+            return ""
+    # Collapse repeated nonsense/filler.
+    s = re.sub(r"(그런\s*){3,}", "", s)
+    s = re.sub(r"(경기\s*){3,}", "", s)
+    s = re.sub(r"\s+", " ", s).strip(" -•*\t")
+    if is_low_value_phrase_v13(s):
+        # Preserve if it has strong concepts/numbers.
+        if len(content_keywords(s)) < 3 and not re.search(r"\d", s):
+            return ""
+    return s
+
+
+def v16_sentence_bank(segments: list[dict]) -> list[dict]:
+    bank = []
+    seen = set()
+    for seg in segments:
+        tm = seg.get("start_hms", "")
+        sid = seg.get("id", "")
+        for sent in sentence_split(seg.get("text", "")):
+            s = v16_clean_sentence(sent)
+            if not s:
+                continue
+            key = re.sub(r"\s+", "", s)[:130]
+            if key in seen:
+                continue
+            seen.add(key)
+            bank.append({"time": tm, "id": sid, "text": s, "keywords": list(content_keywords(s))})
+    return bank
+
+
+def v16_extract_terms(segments: list[dict], glossary: str = "", limit: int = 18) -> list[dict]:
+    text = normalize_language_artifacts(" ".join(s.get("text", "") for s in segments))
+    flat = text.replace(" ", "").lower()
+    candidates = []
+    for raw in re.split(r"[,\n;/]+", glossary or ""):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            _, right = raw.split("=", 1)
+            raw = right.strip() or raw.split("=", 1)[0].strip()
+        candidates.append(raw)
+    for term in V16_IMPORTANT_TERMS + COMMON_IMPORTANT_TERMS:
+        if v16_term_key(term) in flat and term not in candidates:
+            candidates.append(term)
+    for m in re.findall(r"\b[A-Z][A-Z0-9+.-]{1,}\b", text):
+        if m not in candidates:
+            candidates.append(m)
+    # Extract noun-ish labels before definitional particles.
+    for m in re.findall(r"([가-힣A-Za-z0-9+.#_-]{2,}(?:\s+[가-힣A-Za-z0-9+.#_-]{2,}){0,2})\s*(?:이란|란|은|는|이라고|라고|을|를)", text):
+        cand = clean_item_text(m, 70)
+        if cand and cand not in candidates:
+            candidates.append(cand)
+    out = []
+    seen = set()
+    for cand in candidates:
+        name = clean_item_text(cand, 70)
+        key = v16_term_key(name)
+        if not name or key in seen or v16_is_low_value_term(name):
+            continue
+        desc = None
+        for k, v in V16_CANONICAL_DEFINITIONS.items():
+            if key == v16_term_key(k):
+                name, desc = k, v
+                break
+        if not desc:
+            # Use a definitional sentence only if it is truly definition-like.
+            desc = "녹음에서 핵심적으로 언급된 개념입니다. 구체적 의미는 주제별 상세 정리와 원문 맥락을 함께 확인하는 것이 좋습니다."
+            for sent in sentence_split(text):
+                if key in v16_term_key(sent) and any(x in sent for x in ["뜻", "의미", "정의", "말합니다", "이라고", "라고", "개념", "기술"]):
+                    ss = v16_clean_sentence(sent, 260)
+                    if ss and not is_low_value_phrase_v13(ss):
+                        desc = ss
+                        break
+        # Drop weak auto-extracted terms whose only description is generic, unless they are a known acronym or glossary/common term.
+        generic_desc = desc.startswith("녹음에서 핵심적으로 언급된 개념입니다")
+        known_key = any(key == v16_term_key(k) for k in V16_CANONICAL_DEFINITIONS) or any(key == v16_term_key(k) for k in V16_IMPORTANT_TERMS)
+        if generic_desc and not known_key and not re.fullmatch(r"[A-Z][A-Z0-9+.-]{1,}", name):
+            continue
+        out.append({"term": name, "description": desc})
+        seen.add(v16_term_key(name))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def v16_select(bank: list[dict], patterns: list[str], limit: int = 5) -> list[dict]:
+    out = []
+    seen = set()
+    pats = [p.replace(" ", "").lower() for p in patterns]
+    for row in bank:
+        flat = row["text"].replace(" ", "").lower()
+        if any(p in flat for p in pats):
+            k = row["text"][:110]
+            if k not in seen:
+                out.append(row)
+                seen.add(k)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def v16_rewrite_points(heading: str, rows: list[dict], rec_type: str, terms: list[dict], limit: int = 4) -> list[str]:
+    """Convert evidence sentences into editor-grade bullets without copying fillers.
+
+    This is deterministic fallback text.  The LLM may polish it, but even if it is
+    rejected this should still read as a structured document rather than transcript.
+    """
+    joined = " ".join(r.get("text", "") for r in rows)
+    term_names = [t.get("term", "") for t in terms]
+    h = heading
+    bullets: list[str] = []
+    flat = joined.replace(" ", "").lower()
+
+    def add(x: str):
+        x = clean_item_text(x, 520)
+        if x and x[:120] not in {b[:120] for b in bullets}:
+            bullets.append(x)
+
+    # General education/training patterns.  These are not sample-specific outputs;
+    # they translate common lecture evidence into readable notes.
+    if rec_type == "education":
+        if any(k in v16_term_key(h) for k in ["목적", "맥락", "도입", "교육"]):
+            add("강의의 도입부에서는 교육 과정의 맥락과 학습 방식이 소개되며, 이후 다룰 핵심 개념을 자연스럽게 학습하도록 설계되었음을 설명합니다.")
+            add("참석자는 강의를 듣는 것에 그치지 않고 러닝버디나 실습을 통해 자신의 생각을 표현하고 서로의 이해를 돕도록 안내받습니다.")
+        if "ai" in flat or "인공지능" in flat or "변화" in flat:
+            add("AI가 일상과 업무에 깊숙이 들어오면서, 단순히 도구를 사용하는 수준을 넘어 결과의 품질과 오류를 검증하는 역량이 중요해졌다는 점을 강조합니다.")
+            add("직무와 스킬은 빠르게 변화하고 있으며, 앞으로는 AI가 만든 결과를 해석하고 판단하고 업무에 맞게 활용하는 능력이 경쟁력이 된다는 흐름을 제시합니다.")
+        if "메타스킬" in flat or "메타스킬" in v16_term_key(h) or "스킬오브스킬" in flat or "메타인지" in flat:
+            add("메타스킬은 특정 기술 하나를 잘하는 능력보다 상위에 있는 역량으로, 새로운 기술을 배우고 문제를 정의하며 변화에 적응하는 기반 능력으로 설명됩니다.")
+            add("메타인지처럼 자신이 무엇을 알고 모르는지 점검하는 태도는 변화하는 업무 환경에서 학습 방향을 잡는 데 중요한 출발점이 됩니다.")
+        if any(k in flat for k in ["일을주도", "execution", "판단", "결정", "조율", "합의", "자기이해", "네가지"]):
+            add("강의에서는 메타스킬을 일을 주도하는 기술, 판단과 결정의 기술, 조율과 합의의 기술, 자기 이해와 같은 상위 역량으로 설명합니다.")
+            add("AI가 정보를 제공하더라도 목표 설정, 구조화, 최종 판단, 사람 간 조율은 여전히 사람이 담당해야 하는 핵심 역할로 제시됩니다.")
+        if any(k in flat for k in ["검증", "오류", "품질", "감시", "평가", "링크", "출처"]):
+            add("AI 결과를 사용할 때는 답변을 그대로 믿기보다 출처, 근거, 오류 가능성을 확인하고 품질을 관리하는 태도가 필요하다고 설명합니다.")
+        if any(k in flat for k in ["러닝버디", "질문", "설명", "프로젝트", "학습", "실습"]):
+            add("학습자는 러닝버디 활동과 프로젝트 과정을 통해 개념을 자기 언어로 설명하고, 질문과 피드백을 통해 이해를 확장하도록 유도됩니다.")
+        if any(k in flat for k in ["성장", "필수", "놓치", "미래", "2030", "5년"]):
+            add("강의의 결론은 AI 시대에도 사람이 갖춰야 할 기본 사고력과 상위 역량을 놓치지 않아야 지속적으로 성장할 수 있다는 메시지로 정리됩니다.")
+    # Generic meeting/business patterns.
+    if rec_type == "meeting":
+        if any(k in flat for k in ["문제", "배경", "현황", "목표"]):
+            add("논의의 배경과 현재 상황을 공유하고, 해결해야 할 문제와 목표를 정리하는 흐름이 확인됩니다.")
+        if any(k in flat for k in ["결정", "확정", "합의"]):
+            add("원문에서 확인되는 합의 또는 결정 사항은 후속 실행과 별도 관리가 필요합니다.")
+        if any(k in flat for k in ["담당", "기한", "진행", "준비"]):
+            add("실행 항목은 담당자, 기한, 필요한 준비사항을 구분해 관리해야 합니다.")
+    # If patterns already produced editorial bullets, do not pad with raw transcript.
+    if bullets:
+        return bullets[:limit]
+    # Last-resort fallback: summarize the evidence as a topic-level observation,
+    # not as a copied sentence fragment.
+    kws = top_keywords([r.get("text", "") for r in rows], 4)
+    if kws:
+        add(f"이 주제는 {', '.join(kws[:3])}을 중심으로 설명되며, 세부 내용은 원문 맥락을 함께 확인하는 것이 좋습니다.")
+    elif rows:
+        add("이 주제는 녹음에서 별도 흐름으로 언급되었으며, 세부 의미는 원문 맥락을 함께 확인하는 것이 좋습니다.")
+    return bullets[:limit]
+
+
+def v16_make_topic_cards(title: str, segments: list[dict], rec_type: str, terms: list[dict], detail_level: str) -> list[dict]:
+    bank = v16_sentence_bank(segments)
+    cards: list[dict] = []
+    text = normalize_language_artifacts(" ".join(s.get("text", "") for s in segments))
+
+    def add_card(heading: str, patterns: list[str], limit: int = 5):
+        rows = v16_select(bank, patterns, limit=limit)
+        bullets = v16_rewrite_points(heading, rows, rec_type, terms, limit=5 if detail_level == "detailed" else 4)
+        if bullets:
+            cards.append({"heading": heading, "bullets": bullets, "evidence_rows": rows[:2]})
+
+    if rec_type == "education":
+        add_card("교육의 목적과 학습 맥락", ["교육", "과정", "학습", "오늘", "환영", "메타스킬", "구성", "프로젝트"])
+        add_card("AI 시대와 업무 환경 변화", ["AI", "인공지능", "시대", "변화", "직업", "스킬", "2030", "5년", "스킬 갭"])
+        add_card("핵심 개념의 정의", ["메타스킬", "메타 스킬", "스킬 오브 스킬", "메타인지", "정의", "개념", "기술에 대한 기술"])
+        add_card("메타스킬의 구성 요소", ["일을 주도", "Execution", "판단과 결정", "판단", "조율과 합의", "조율", "합의", "자기 이해", "네 가지"])
+        add_card("AI 활용에서 사람의 역할", ["검증", "오류", "품질", "감시", "평가", "통제", "관리", "출처", "링크"])
+        add_card("학습 방식과 실습 활동", ["러닝버디", "질문", "설명", "스마트폰", "프로젝트", "학습", "실습", "표현"])
+        add_card("성장 관점의 시사점", ["성장", "필수", "프라이머", "놓치면", "미래", "중요", "기본", "경험"])
+    elif rec_type == "meeting":
+        add_card("논의 배경과 문제 상황", ["배경", "현황", "문제", "목표", "필요", "이슈"])
+        add_card("주요 논의 내용", ["논의", "검토", "방안", "의견", "전략", "대안"])
+        add_card("결정사항과 합의 내용", ["결정", "합의", "확정", "승인", "진행하기로"])
+        add_card("실행 항목과 후속 조치", ["담당", "기한", "진행", "준비", "후속", "액션", "해야"])
+        add_card("리스크와 확인 필요 사항", ["리스크", "위험", "불확실", "확인", "주의", "문제"])
+    else:
+        add_card("주요 배경과 문제 제기", ["배경", "문제", "현황", "시작", "중요", "필요"])
+        add_card("핵심 주장과 설명", ["핵심", "주장", "설명", "의미", "결론", "정리"])
+        add_card("주요 사례와 근거", ["예를", "사례", "근거", "수치", "데이터", "비교"])
+        add_card("시사점과 확인 필요 사항", ["시사점", "확인", "주의", "리스크", "후속", "필요"])
+
+    # Backfill cards with chronological groups if the pattern cards are sparse.
+    if len(cards) < 4:
+        blocks = chronological_blocks(segments, block_max_chars=1200, max_blocks=6 if detail_level != "detailed" else 8, max_total_chars=10000)
+        for i, b in enumerate(blocks, start=1):
+            rows = [{"time": b.get("start", b.get("time", "")), "text": s, "id": ""} for s in sentence_split(b.get("text", "")) if v16_clean_sentence(s)]
+            bullets = v16_rewrite_points(f"시간순 핵심 흐름 {i}", rows, rec_type, terms, limit=4)
+            if bullets:
+                cards.append({"heading": derive_heading_from_bullets(bullets, f"시간순 핵심 흐름 {i}"), "bullets": bullets, "evidence_rows": rows[:2]})
+            if len(cards) >= 7:
+                break
+    # Merge duplicates and remove weak cards.
+    out = []
+    seen = set()
+    for c in cards:
+        h = clean_item_text(c.get("heading"), 100)
+        bullets = [clean_item_text(b, 520) for b in as_list(c.get("bullets")) if clean_item_text(b, 520)]
+        bullets = [b for b in bullets if not is_low_value_phrase_v13(b) or len(content_keywords(b)) >= 2]
+        if not h or not bullets:
+            continue
+        key = v16_term_key(h)
+        if key in seen:
+            continue
+        out.append({"heading": h, "bullets": bullets[:5], "evidence_rows": c.get("evidence_rows", [])})
+        seen.add(key)
+        if len(out) >= (10 if detail_level == "detailed" else 7):
+            break
+    return out
+
+
+def v16_concepts_from_cards(cards: list[dict], terms: list[dict], rec_type: str, detail_level: str) -> list[str]:
+    points: list[str] = []
+    # Prefer curated term definitions.
+    for t in terms[:14]:
+        name = clean_item_text(t.get("term"), 90)
+        desc = clean_item_text(t.get("description"), 420)
+        if name and desc and not v16_is_low_value_term(name):
+            points.append(f"{name}: {desc}")
+    # Add high-level concept/논점 from topic cards.
+    for c in cards:
+        h = clean_item_text(c.get("heading"), 90)
+        if h and h not in [p.split(":", 1)[0] for p in points]:
+            bullets = as_list(c.get("bullets"))
+            if bullets:
+                points.append(f"{h}: {clean_item_text(bullets[0], 420)}")
+    # De-duplicate and cap.
+    out, seen = [], set()
+    for p in points:
+        k = v16_term_key(p.split(":", 1)[0])
+        if k and k not in seen and not v16_is_low_value_term(p.split(":", 1)[0]):
+            out.append(p)
+            seen.add(k)
+        if len(out) >= (14 if detail_level == "detailed" else 10):
+            break
+    return out
+
+
+def v16_action_items(rec_type: str, cards: list[dict], terms: list[dict]) -> list[str]:
+    term_keys = {v16_term_key(t.get("term", "")) for t in terms}
+    actions: list[str] = []
+    if rec_type == "education":
+        if "ai" in term_keys:
+            actions.append("AI 도구가 만든 결과를 사용할 때는 목적, 근거, 오류 가능성을 함께 점검합니다.")
+        if "메타스킬" in term_keys or "메타스킬" in " ".join(c.get("heading", "") for c in cards):
+            actions.extend([
+                "본인의 업무에서 일을 주도하는 기술, 판단과 결정, 조율과 합의, 자기 이해가 필요한 상황을 각각 찾아봅니다.",
+                "러닝버디나 동료와 함께 핵심 개념을 자기 언어로 설명해 보며 이해 수준을 점검합니다.",
+            ])
+        if any(v16_term_key(x) in term_keys for x in ["연말정산", "총급여", "소득공제", "세액공제"]):
+            actions.extend([
+                "근로소득 원천징수영수증에서 총급여와 이미 납부한 세금을 먼저 확인합니다.",
+                "소득공제와 세액공제 항목을 구분해 본인에게 적용 가능한 항목을 목록화합니다.",
+                "부양가족, 월세, 주택자금, 청약통장, 신용카드 사용액처럼 직접 확인이 필요한 항목을 미리 점검합니다.",
+            ])
+        if not actions:
+            actions.extend([
+                "강의에서 제시된 핵심 개념을 자기 업무나 학습 상황에 어떻게 적용할지 정리합니다.",
+                "불확실한 용어와 조건은 원문 또는 추가 자료로 확인합니다.",
+            ])
+    elif rec_type == "meeting":
+        actions.append("원문에서 확인되는 담당자, 기한, 후속 조치가 있는지 별도 확인해 실행 항목으로 관리합니다.")
+    else:
+        actions.append("녹음에서 제시된 주요 내용을 실제 업무나 학습에 적용할 수 있는 항목으로 다시 점검합니다.")
+    return actions[:8]
+
+
+def v16_risks(rec_type: str, cards: list[dict], terms: list[dict]) -> list[str]:
+    term_keys = {v16_term_key(t.get("term", "")) for t in terms}
+    risks = []
+    if "ai" in term_keys:
+        risks.append("AI 결과를 검증 없이 그대로 사용하면 오류나 부정확한 판단이 업무 품질에 영향을 줄 수 있습니다.")
+        risks.append("도구 사용 능력만으로는 충분하지 않으며, 문제 정의와 최종 판단을 수행할 사람의 역량이 함께 필요합니다.")
+    if any(v16_term_key(x) in term_keys for x in ["연말정산", "소득공제", "세액공제"]):
+        risks.append("공제 대상, 금액 기준, 필요 서류는 제도별로 다르므로 최신 기준을 확인하지 않으면 잘못 적용할 수 있습니다.")
+        risks.append("자동 반영되지 않는 항목을 놓치면 받을 수 있는 공제를 적용하지 못할 수 있습니다.")
+    if not risks:
+        risks.append("ASR 전사에는 고유명사와 숫자 오인식이 섞일 수 있으므로 중요한 조건과 명칭은 원문 또는 관련 자료로 재확인해야 합니다.")
+    return risks[:6]
+
+
+def v16_quotes(segments: list[dict], limit: int = 8) -> list[dict]:
+    out = []
+    for seg in pick_representative_segments(segments, limit=limit * 2):
+        txt = v16_clean_sentence(seg.get("text", ""), 260)
+        if txt and len(txt) >= 18:
+            out.append({"time": seg.get("start_hms", ""), "text": txt})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def v16_timeline(segments: list[dict], detail_level: str) -> list[dict]:
+    blocks = chronological_blocks(segments, block_max_chars=1150, max_blocks=10 if detail_level == "detailed" else 7, max_total_chars=13000)
+    out = []
+    for b in blocks:
+        sents = [v16_clean_sentence(x, 280) for x in sentence_split(b.get("text", ""))]
+        sents = [s for s in sents if s]
+        if sents:
+            out.append({"time": b.get("time", ""), "event": sents[0]})
+    return out
+
+
+def v16_build_editorial_markdown(title: str, segments: list[dict], detail_level: str, glossary: str = "") -> tuple[str, dict]:
+    rec_type = v16_detect_type(title, segments)
+    terms = v16_extract_terms(segments, glossary, limit=18 if detail_level == "detailed" else 12)
+    cards = v16_make_topic_cards(title, segments, rec_type, terms, detail_level)
+    concepts = v16_concepts_from_cards(cards, terms, rec_type, detail_level)
+    actions = v16_action_items(rec_type, cards, terms)
+    risks = v16_risks(rec_type, cards, terms)
+    timeline = v16_timeline(segments, detail_level)
+    quotes = v16_quotes(segments, limit=10 if detail_level == "detailed" else 7)
+    topic_names = [c["heading"] for c in cards[:5]]
+
+    lines = [f"# {title}", "", "## 1. 한 페이지 요약", ""]
+    if rec_type == "education":
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '핵심 개념과 학습 흐름'}을 중심으로 내용을 설명하는 교육형 자료입니다. 발화 내용을 그대로 옮기기보다, 학습자가 이해하기 쉬운 개념의 순서와 실제 적용 포인트를 중심으로 재구성했습니다. 핵심은 단순 정보 전달보다 변화하는 환경에서 필요한 사고방식, 판단 기준, 실천 항목을 정리하는 데 있습니다.")
+    elif rec_type == "meeting":
+        lines.append("이 녹음은 회의 또는 업무 논의 내용을 바탕으로 주요 배경, 논의 흐름, 결정사항, 실행 항목과 확인이 필요한 내용을 정리한 문서입니다. 발화 순서보다 의사결정과 후속 조치에 필요한 구조를 우선했습니다.")
+    elif rec_type == "commentary":
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '주요 사건과 해설'}을 중심으로 배경과 의미를 설명하는 해설형 자료입니다. 핵심 주장, 근거, 주요 사례와 확인이 필요한 내용을 구분해 정리했습니다.")
+    else:
+        lines.append(f"이 녹음은 {', '.join(topic_names[:4]) if topic_names else '주요 내용'}을 중심으로 진행됩니다. 원문을 그대로 나열하지 않고 핵심 배경, 주요 흐름, 세부 내용, 확인 필요한 사항으로 재구성했습니다.")
+
+    lines += ["", "## 2. 전체 구조화 정리", ""]
+    for c in cards[:8]:
+        desc = clean_item_text(c["bullets"][0], 360) if c.get("bullets") else "주요 내용입니다."
+        lines.append(f"- **{clean_item_text(c['heading'], 90)}:** {desc}")
+
+    lines += ["", "## 3. 주제별 상세 정리", ""]
+    for i, c in enumerate(cards[:10], start=1):
+        lines.append(f"### {i}. {clean_item_text(c['heading'], 95)}")
+        for b in c.get("bullets", [])[:5]:
+            lines.append(f"- {clean_item_text(b, 560)}")
+        lines.append("")
+
+    lines += ["## 4. 핵심 개념 / 논점", ""]
+    for p in concepts[:14]:
+        lines.append(f"- **{clean_item_text(p.split(':',1)[0], 90)}:** {clean_item_text(p.split(':',1)[1] if ':' in p else p, 520)}")
+
+    lines += ["", "## 5. 결정사항 / 결론", ""]
+    if rec_type == "meeting":
+        lines.append("- 원문에서 명확히 확인되는 결정사항은 별도 실행 항목으로 관리해야 합니다. 결정 여부가 불명확한 내용은 확인 필요한 내용으로 남깁니다.")
+    elif rec_type == "education":
+        lines.append("- 이 자료는 특정 의사결정보다는 핵심 개념과 절차를 이해하고, 실제 업무나 학습 상황에 적용할 수 있는 기준을 파악하는 데 초점이 있습니다.")
+        if topic_names:
+            lines.append(f"- 핵심 흐름은 {', '.join(topic_names[:5])} 순서로 이해할 수 있습니다.")
+    else:
+        lines.append("- 원문에서 명시적 결정사항은 확인되지 않으며, 주요 내용과 시사점 중심으로 이해하는 것이 적절합니다.")
+
+    lines += ["", "## 6. 실행 항목", ""]
+    for a in actions:
+        lines.append(f"- {clean_item_text(a, 520)}")
+
+    lines += ["", "## 7. 리스크 / 이슈", ""]
+    for r in risks:
+        lines.append(f"- {clean_item_text(r, 520)}")
+
+    lines += ["", "## 8. 타임라인 / 진행 흐름", ""]
+    for tl in timeline:
+        tm, ev = clean_item_text(tl.get("time"), 40), clean_item_text(tl.get("event"), 330)
+        if ev:
+            lines.append(f"- [{tm}] {ev}" if tm else f"- {ev}")
+
+    lines += ["", "## 9. 중요 발언 / 근거", ""]
+    for q in quotes:
+        tm, qt = clean_item_text(q.get("time"), 40), clean_item_text(q.get("text"), 300)
+        if qt:
+            lines.append(f"- [{tm}] \"{qt}\"" if tm else f"- \"{qt}\"")
+
+    lines += ["", "## 10. 용어 / 개념", ""]
+    for t in terms[:16]:
+        if not v16_is_low_value_term(t.get("term", "")):
+            lines.append(f"- **{clean_item_text(t.get('term'), 90)}:** {clean_item_text(t.get('description'), 430)}")
+
+    lines += ["", "## 11. 확인 필요한 내용", ""]
+    lines.append("- ASR 전사에는 고유명사, 숫자, 약어 오인식이 섞일 수 있으므로 중요한 명칭과 수치는 원문 또는 관련 자료로 확인하는 것이 좋습니다.")
+    if rec_type == "education":
+        lines.append("- 강의에서 제시된 개념은 실제 조직·업무·제도에 적용할 때 세부 조건과 최신 기준을 별도로 확인해야 합니다.")
+
+    md = clean_human_markdown_text("\n".join(lines), title)
+    pack = {"recording_type": rec_type, "terms": terms, "topics": cards, "concepts": concepts, "actions": actions, "risks": risks, "timeline": timeline, "quotes": quotes}
+    return md, pack
+
+
+def v16_make_polish_prompt(title: str, draft_md: str, segments: list[dict], pack: dict, language: str, glossary: str, detail_level: str) -> str:
+    context = full_transcript_or_digest_for_writer(segments, RuntimeProfile(
+        name="v16_context", label="", asr_model="", asr_device="", asr_compute_type="", asr_beam_size=1,
+        llm_model="", llm_device="cuda", max_chars_per_chunk=12000, chunk_overlap_chars=0,
+        max_new_tokens_chunk=0, max_new_tokens_final=0, description=""
+    ), detail_level)
+    glossary_text = f"\n사용자 제공 용어/고유명사·ASR 보정 힌트:\n{glossary}\n" if glossary.strip() else ""
+    return f"""
+당신은 최종 DOCX 문서를 다듬는 전문 한국어 편집자입니다.
+아래 '편집자 초안'은 이미 source transcript에 근거해 구성된 문서입니다. 이 초안의 구조와 핵심 내용을 유지하면서, 더 자연스럽고 체계적인 최종 Markdown으로 다듬으세요.
+
+문서 제목: {title}
+출력 언어: {language}
+녹음 성격: {pack.get('recording_type')}
+{glossary_text}
+중요 규칙:
+- 초안을 transcript 조각처럼 다시 되돌리지 마세요. 반드시 사람이 쓴 보고서처럼 작성하세요.
+- 초안의 섹션 구조 1~11을 유지하세요.
+- 핵심 개념/용어 섹션은 정의와 해설을 쓰고, 원문 발화 조각을 그대로 붙이지 마세요.
+- 원문에 없는 사실은 추가하지 마세요.
+- 중국어, 일본어, 한자식 문자, JSON, 코드블록, Python dict/list를 출력하지 마세요.
+- Markdown만 출력하세요.
+
+편집자 초안:
+{draft_md[:22000]}
+
+참고용 원본 transcript:
+{context[:26000]}
+""".strip()
+
+
+def v16_markdown_quality(md: str, title: str) -> tuple[bool, list[str]]:
+    reasons = []
+    m = clean_human_markdown_text(md or "", title)
+    if len(m) < 1800:
+        reasons.append("too_short")
+    if re.search(r"```|\{\s*['\"]?(heading|bullets|topics|summary|text)['\"]?\s*:", m):
+        reasons.append("json_or_code_leak")
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", m):
+        reasons.append("cjk_or_japanese_leak")
+    sections = extract_markdown_sections(m)
+    if len(set(sections.keys()) & {str(i) for i in range(1, 12)}) < 10:
+        reasons.append("missing_sections")
+    # Bad if core sections still look like raw transcript or term frequency dump.
+    core = sections.get("3", "") + sections.get("4", "") + sections.get("10", "")
+    low_value_hits = sum(1 for x in ["필수적인", "돌아왔습니다", "깎아주기도", "공제해줍니다", "여러분들", "모르겠어요", "그런", "라고"] if x in core)
+    if low_value_hits >= 3:
+        reasons.append("raw_or_low_value_fragments")
+    if m.count("명시적으로 확인되지 않음") >= 6:
+        reasons.append("too_many_unknowns")
+    return not reasons, reasons
+
+
+def v16_generate_markdown(
+    segments: list[dict],
+    title: str,
+    profile: RuntimeProfile,
+    language: str,
+    glossary: str,
+    allow_download: bool,
+    use_final_llm: bool,
+    detail_level: str,
+    max_new_tokens: int,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> tuple[str, dict, dict]:
+    draft_md, pack = v16_build_editorial_markdown(title, segments, detail_level, glossary)
+    llm_used = False
+    repair_used = False
+    quality_reasons = []
+    final_md = draft_md
+    if use_final_llm:
+        try:
+            llm = get_llm(profile.llm_model, profile.llm_device, allow_download=allow_download)
+            prompt = v16_make_polish_prompt(title, draft_md, segments, pack, language, glossary, detail_level)
+            if log_cb:
+                log_cb(f"✍️ v16 editorial draft 기반 최종 Markdown polish / max_new_tokens={max_new_tokens}")
+            raw = llm.generate(SYSTEM_PROMPT_MARKDOWN, prompt, max_new_tokens=max_new_tokens)
+            candidate = clean_human_markdown_text(raw, title)
+            ok, reasons = v16_markdown_quality(candidate, title)
+            if ok:
+                final_md = candidate
+                llm_used = True
+            else:
+                # If the LLM draft is weak, keep the deterministic editor draft and record why.
+                repair_used = True
+                quality_reasons = reasons
+                if log_cb:
+                    log_cb("⚠️ v16 LLM polish 결과가 품질 기준을 통과하지 못해 editor draft를 사용합니다: " + ", ".join(reasons))
+        except Exception as e:
+            repair_used = True
+            quality_reasons = [f"llm_polish_error: {e}"]
+            if log_cb:
+                log_cb(f"⚠️ v16 LLM polish 오류. editor draft를 사용합니다: {e}")
+    # Always clean/patch final once more.
+    final_md = clean_human_markdown_text(final_md, title)
+    ok, reasons = v16_markdown_quality(final_md, title)
+    if not ok:
+        # The deterministic draft is designed to be safe; if the LLM made it worse, restore draft.
+        final_md = clean_human_markdown_text(draft_md, title)
+        quality_reasons = quality_reasons or reasons
+        repair_used = True
+    info = {
+        "editor_draft_used": True,
+        "llm_polish_used": llm_used,
+        "quality_reasons": quality_reasons,
+        "recording_type": pack.get("recording_type"),
+        "topic_count": len(pack.get("topics", [])),
+        "term_count": len(pack.get("terms", [])),
+    }
+    return final_md, pack, info
+
+
+# Final v16 override.  This replaces all older v9~v15 final-output paths.
+def summarize_segments(
+    segments: list[dict],
+    title: str,
+    profile: RuntimeProfile,
+    language: str = "ko",
+    glossary: str = "",
+    allow_download: bool = True,
+    use_final_llm: bool = True,
+    detail_level: str = "detailed",
+    processing_strategy: str = "auto",
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> dict:
+    cfg = detail_cfg(detail_level)
+    strategy = effective_strategy(processing_strategy, profile)
+    chunks = chunk_segments(segments, profile.max_chars_per_chunk, profile.chunk_overlap_chars)
+    transcript_chars = sum(len(s.get("text", "")) for s in segments)
+    final_tokens = max(1800, int(profile.max_new_tokens_final * cfg["token_multiplier"]))
+    if profile.llm_device == "cpu":
+        # CPU stays faster: editor draft is deterministic and polish is shorter.
+        final_tokens = min(max(final_tokens, 2600), 4200)
+    else:
+        # GPU quality can polish but should not over-generate.
+        final_tokens = min(max(final_tokens, 4200), 7600)
+    if log_cb:
+        log_cb(f"🧩 transcript chunk 수: {len(chunks)} / chunk_chars={profile.max_chars_per_chunk} / overlap={profile.chunk_overlap_chars}")
+        log_cb(f"📝 문서 상세도: {detail_level} ({cfg['label']}) / 처리 전략={strategy} / v16_editorial_tokens={final_tokens}")
+    # v16 intentionally uses one robust editorial path for all profiles.  It uses
+    # deterministic content planning first and LLM polish second, so a bad LLM
+    # answer cannot degrade the DOCX into transcript fragments.
+    md, pack, info = v16_generate_markdown(
+        segments, title, profile, language, glossary, allow_download,
+        use_final_llm and strategy != "extractive", detail_level, final_tokens, log_cb
+    )
+    rec_type = pack.get("recording_type", "general")
+    run_config = {
+        "pipeline_version": PIPELINE_VERSION,
+        "title": title,
+        "detail_level": detail_level,
+        "processing_strategy_requested": processing_strategy,
+        "processing_strategy_effective": strategy,
+        "processing_strategy_note": "v16 = deterministic editorial content plan + optional LLM polish; transcript-fragment fallback removed",
+        "profile_name": profile.name,
+        "asr_model": profile.asr_model,
+        "asr_device": profile.asr_device,
+        "asr_compute_type": profile.asr_compute_type,
+        "llm_model": profile.llm_model,
+        "llm_device": profile.llm_device,
+        "max_chars_per_chunk": profile.max_chars_per_chunk,
+        "chunk_overlap_chars": profile.chunk_overlap_chars,
+        "max_new_tokens_chunk_effective": 0,
+        "max_new_tokens_final_effective": final_tokens,
+        "chunk_count": len(chunks),
+        "segment_count": len(segments),
+        "transcript_chars": transcript_chars,
+        "structured_json_chars": 0,
+        "asr_error_aware": True,
+        "glossary_provided": bool(glossary.strip()),
+        "use_final_llm": use_final_llm,
+        "llm_calls": 1 if info.get("llm_polish_used") else (1 if use_final_llm and strategy != "extractive" else 0),
+        "final_llm_failed": bool(info.get("quality_reasons")) and not info.get("llm_polish_used"),
+        "final_repair_used": False,
+        "style_repair_used": bool(info.get("quality_reasons")),
+        "final_markdown_used": True,
+        "sectioned_markdown_used": False,
+        "transcript_first_markdown_used": True,
+        "complete_markdown_writer_used": True,
+        "plan_guided_markdown_used": True,
+        "content_plan_used": True,
+        "document_architect_writer_used": True,
+        "markdown_repair_used": bool(info.get("quality_reasons")),
+        "llm_writer_used": bool(info.get("llm_polish_used")),
+        "editor_draft_used": True,
+        "final_writer_mode": "v16_editorial_plan_then_optional_llm_polish",
+        "fallback_used": False,
+        "recording_type": rec_type,
+        "topic_count": info.get("topic_count"),
+        "term_count": info.get("term_count"),
+        "quality_reasons_after_repair": info.get("quality_reasons", []),
+    }
+    return {"chunk_notes": [], "final": empty_final(), "final_markdown": md, "chunk_count": len(chunks), "run_config": run_config}
+

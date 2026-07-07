@@ -21,7 +21,7 @@ class RuntimeProfile:
     description: str
 
 
-# v14 defaults: CPU auto keeps the practical direct-writer fast mode.
+# v15 defaults: CPU auto keeps the practical direct-writer fast mode.
 # GPU profiles use a grounded content pack + document-architect Markdown writer.
 # The goal is to synthesize a human-readable document instead of copying transcript chunks.
 PROFILES: Dict[str, RuntimeProfile] = {
@@ -68,7 +68,7 @@ PROFILES: Dict[str, RuntimeProfile] = {
         chunk_overlap_chars=320,
         max_new_tokens_chunk=1500,
         max_new_tokens_final=3600,
-        description="CUDA가 가능한 보급형 GPU. v14에서는 content pack 기반 document-architect writer로 가독성을 개선했습니다.",
+        description="CUDA가 가능한 보급형 GPU. v15에서는 content pack 기반 document-architect writer로 가독성을 개선했습니다.",
     ),
     "gpu_balanced": RuntimeProfile(
         name="gpu_balanced",
@@ -86,7 +86,7 @@ PROFILES: Dict[str, RuntimeProfile] = {
         chunk_overlap_chars=360,
         max_new_tokens_chunk=1900,
         max_new_tokens_final=4600,
-        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필. v14에서는 content pack 기반 document-architect writer를 우선 사용해 사람이 쓴 문서처럼 정리합니다.",
+        description="대부분의 CUDA GPU 서버/데스크톱에 적합한 기본 품질 프로필. v15에서는 content pack 기반 document-architect writer를 우선 사용해 사람이 쓴 문서처럼 정리합니다.",
     ),
     "gpu_quality": RuntimeProfile(
         name="gpu_quality",
@@ -101,7 +101,7 @@ PROFILES: Dict[str, RuntimeProfile] = {
         chunk_overlap_chars=520,
         max_new_tokens_chunk=3000,
         max_new_tokens_final=7200,
-        description="RTX 3090/4090 또는 24GB급 이상에서 품질 우선. v14에서는 content pack 기반 document-architect writer를 우선 사용하여 7B 모델이 구조화된 문서를 쓰도록 합니다.",
+        description="RTX 3090/4090 또는 24GB급 이상에서 품질 우선. v15에서는 content pack 기반 document-architect writer를 우선 사용하여 7B 모델이 구조화된 문서를 쓰도록 합니다.",
     ),
 }
 
